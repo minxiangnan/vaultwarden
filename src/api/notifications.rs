@@ -15,13 +15,16 @@ use crate::{
     auth::{ClientIp, WsAccessTokenHeader},
     db::{
         DbConn,
-        models::{AuthRequestId, Cipher, CollectionId, Device, DeviceId, Folder, PushId, Send as DbSend, User, UserId},
+        models::{
+            AuthRequestId, AuthenticatorEntry, Cipher, CollectionId, Device, DeviceId, Folder, PushId, Send as DbSend,
+            User, UserId,
+        },
     },
 };
 
 use super::{
-    push::push_auth_request, push::push_auth_response, push_cipher_update, push_folder_update, push_logout,
-    push_send_update, push_user_update,
+    push::push_auth_request, push::push_auth_response, push_authenticator_update, push_cipher_update,
+    push_folder_update, push_logout, push_send_update, push_user_update,
 };
 
 pub static WS_USERS: LazyLock<Arc<WebSocketUsers>> = LazyLock::new(|| {
@@ -468,6 +471,36 @@ impl WebSocketUsers {
         }
     }
 
+    pub async fn send_authenticator_update(
+        &self,
+        ut: UpdateType,
+        entry: &AuthenticatorEntry,
+        device: &Device,
+        conn: &DbConn,
+    ) {
+        // Skip any processing if both WebSockets and Push are not active
+        if *NOTIFICATIONS_DISABLED {
+            return;
+        }
+        let data = create_update(
+            vec![
+                ("Id".into(), entry.uuid.to_string().into()),
+                ("UserId".into(), entry.user_uuid.to_string().into()),
+                ("RevisionDate".into(), serialize_date(entry.revision_date)),
+            ],
+            ut,
+            Some(device.uuid.clone()),
+        );
+
+        if CONFIG.enable_websocket() {
+            self.send_update(&entry.user_uuid, &data).await;
+        }
+
+        if CONFIG.push_enabled() {
+            push_authenticator_update(ut, entry, device, conn).await;
+        }
+    }
+
     pub async fn send_cipher_update(
         &self,
         ut: UpdateType,
@@ -745,6 +778,12 @@ pub enum UpdateType {
     // NotificationStatus = 21, // Not supported
 
     // RefreshSecurityTasks = 22, // Not supported
+
+    // Fork-only standalone authenticator entries. Official clients ignore unknown types.
+    SyncAuthenticatorCreate = 30,
+    SyncAuthenticatorUpdate = 31,
+    SyncAuthenticatorDelete = 32,
+
     None = 100,
 }
 
