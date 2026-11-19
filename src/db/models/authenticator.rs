@@ -151,6 +151,14 @@ impl AuthenticatorEntry {
         .await
     }
 
+    /// Any entry with this id, including one owned by another user. Callers must check ownership.
+    pub async fn find_by_uuid(uuid: &AuthenticatorEntryId, conn: &DbConn) -> Option<Self> {
+        conn.run(move |conn| {
+            authenticator_entries::table.filter(authenticator_entries::uuid.eq(uuid)).first::<Self>(conn).ok()
+        })
+        .await
+    }
+
     pub async fn find_by_uuid_and_user(uuid: &AuthenticatorEntryId, user_uuid: &UserId, conn: &DbConn) -> Option<Self> {
         conn.run(move |conn| {
             authenticator_entries::table
@@ -233,5 +241,27 @@ mod json_tests {
         assert!(json["revisionDate"].as_str().unwrap().starts_with("2026-11-15"));
         assert!(json["creationDate"].as_str().unwrap().ends_with('Z'));
         assert!(json.get("userId").is_none());
+
+        // Same keys `AuthenticatorEntryResponse` reads from a list item or a sync entry.
+        let mut keys: Vec<_> = json.as_object().unwrap().keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "algorithm",
+                "creationDate",
+                "digits",
+                "favorite",
+                "id",
+                "issuer",
+                "name",
+                "notes",
+                "object",
+                "period",
+                "revisionDate",
+                "secret",
+                "sortOrder",
+            ]
+        );
     }
 }

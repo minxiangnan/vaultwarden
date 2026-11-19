@@ -17,6 +17,11 @@ use crate::{
 //
 // PUT replaces the entry. Omitted optional fields use the same defaults as POST: issuer and notes
 // become null, algorithm SHA1, digits 6, period 30, favorite false, sortOrder 0.
+//
+// `to_json` is the Entry shape parsed by `AuthenticatorEntryResponse` in the forked browser
+// extension (`apps/browser/src/authenticator/authenticator.models.ts`): id, name, issuer, secret,
+// algorithm, digits, period, notes, favorite, sortOrder, revisionDate, creationDate, and
+// object "authenticatorEntry". `GET /api/sync` returns that same object in `authenticatorEntries`.
 
 const DEFAULT_ALGORITHM: &str = "SHA1";
 const DEFAULT_DIGITS: i32 = 6;
@@ -198,6 +203,89 @@ fn normalize_digits(value: Option<i32>) -> ApiResult<i32> {
     }
 }
 
+/// One authenticator entry inside a key-rotation `accountData.authenticatorEntries` item.
+///
+/// `name`, `issuer`, `secret`, and `notes` are EncStrings re-encrypted with the new user key.
+/// `algorithm`, `digits`, `period`, `favorite`, and `sortOrder` are the plaintext fields and must
+/// be omitted or equal to the stored entry.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AuthenticatorRotationData {
+    pub id: AuthenticatorEntryId,
+    pub name: String,
+    pub issuer: Option<String>,
+    pub secret: String,
+    pub notes: Option<String>,
+    pub algorithm: Option<String>,
+    pub digits: Option<i32>,
+    pub period: Option<i32>,
+    pub favorite: Option<bool>,
+    pub sort_order: Option<i32>,
+}
+
+pub(crate) struct ReencryptedAuthenticator {
+    pub name: String,
+    pub issuer: Option<String>,
+    pub secret: String,
+    pub notes: Option<String>,
+}
+
+/// Checks a rotation item against the stored entry and returns the new ciphertext.
+///
+/// An issuer or notes value that exists must be re-encrypted. One that does not exist cannot be
+/// added here. Plaintext metadata cannot change.
+pub(crate) fn reencrypted_content(
+    existing: &AuthenticatorEntry,
+    data: &AuthenticatorRotationData,
+) -> ApiResult<ReencryptedAuthenticator> {
+    unchanged_str(data.algorithm.as_deref(), &existing.algorithm, "Algorithm")?;
+    unchanged_i32(data.digits, existing.digits, "Digits")?;
+    unchanged_i32(data.period, existing.period, "Period")?;
+    unchanged_bool(data.favorite, existing.favorite, "Favorite")?;
+    unchanged_i32(data.sort_order, existing.sort_order, "SortOrder")?;
+
+    Ok(ReencryptedAuthenticator {
+        name: validate_enc_string(data.name.clone(), "Name")?,
+        issuer: reencrypted_optional(existing.issuer.as_deref(), data.issuer.clone(), "Issuer")?,
+        secret: validate_enc_string(data.secret.clone(), "Secret")?,
+        notes: reencrypted_optional(existing.notes.as_deref(), data.notes.clone(), "Notes")?,
+    })
+}
+
+fn reencrypted_optional(current: Option<&str>, provided: Option<String>, field: &str) -> ApiResult<Option<String>> {
+    let provided = match provided {
+        None => None,
+        Some(value) if value.is_empty() => None,
+        Some(value) => Some(validate_enc_string(value, field)?),
+    };
+    match (current.is_some(), provided.is_some()) {
+        (true, false) => err!(format!("The {field} field must be re-encrypted during key rotation.")),
+        (false, true) => err!(format!("The {field} field cannot be added during key rotation.")),
+        _ => Ok(provided),
+    }
+}
+
+fn unchanged_str(provided: Option<&str>, current: &str, field: &str) -> EmptyResult {
+    if provided.is_some_and(|value| value != current) {
+        err!(format!("The {field} field cannot change during key rotation."))
+    }
+    Ok(())
+}
+
+fn unchanged_i32(provided: Option<i32>, current: i32, field: &str) -> EmptyResult {
+    if provided.is_some_and(|value| value != current) {
+        err!(format!("The {field} field cannot change during key rotation."))
+    }
+    Ok(())
+}
+
+fn unchanged_bool(provided: Option<bool>, current: bool, field: &str) -> EmptyResult {
+    if provided.is_some_and(|value| value != current) {
+        err!(format!("The {field} field cannot change during key rotation."))
+    }
+    Ok(())
+}
+
 fn normalize_period(value: Option<i32>) -> ApiResult<i32> {
     match value {
         None => Ok(DEFAULT_PERIOD),
@@ -277,6 +365,52 @@ mod validation_tests {
         let huge = format!("2.{}", "a".repeat(MAX_ENCRYPTED_LEN));
         assert!(request(json!({"name": huge, "secret": ENC})).into_fields().is_err());
         assert!(serde_json::from_value::<AuthenticatorEntryData>(json!({"secret": ENC})).is_err());
+    }
+
+    #[test]
+    fn rotation_reencrypts_ciphertext_and_keeps_plaintext_metadata() {
+        let entry = AuthenticatorEntry {
+            uuid: String::from("11111111-1111-1111-1111-111111111111").into(),
+            user_uuid: String::from("22222222-2222-2222-2222-222222222222").into(),
+            name: ENC.into(),
+            issuer: Some(ENC.into()),
+            secret: ENC.into(),
+            algorithm: "SHA1".into(),
+            digits: 6,
+            period: 30,
+            notes: None,
+            favorite: false,
+            sort_order: 0,
+            revision_date: chrono::NaiveDateTime::parse_from_str("2026-11-15 00:00:00", "%Y-%m-%d %H:%M:%S").unwrap(),
+            creation_date: chrono::NaiveDateTime::parse_from_str("2026-11-15 00:00:00", "%Y-%m-%d %H:%M:%S").unwrap(),
+        };
+        let rotated: AuthenticatorRotationData = serde_json::from_value(json!({
+            "id": entry.uuid,
+            "name": "2.newname",
+            "issuer": "2.newissuer",
+            "secret": "2.newsecret",
+            "algorithm": "SHA1",
+            "digits": 6,
+            "period": 30,
+            "favorite": false,
+            "sortOrder": 0
+        }))
+        .unwrap();
+        let updated = reencrypted_content(&entry, &rotated).unwrap();
+        assert_eq!(updated.name, "2.newname");
+        assert_eq!(updated.issuer.as_deref(), Some("2.newissuer"));
+        assert_eq!(updated.secret, "2.newsecret");
+        assert!(updated.notes.is_none());
+
+        for value in [
+            json!({"id": entry.uuid, "name": "2.newname", "secret": "2.newsecret"}),
+            json!({"id": entry.uuid, "name": "2.newname", "issuer": "2.newissuer", "secret": "2.newsecret", "digits": 8}),
+            json!({"id": entry.uuid, "name": "2.newname", "issuer": "2.newissuer", "secret": "2.newsecret", "notes": "2.notes"}),
+            json!({"id": entry.uuid, "name": "GitHub", "issuer": "2.newissuer", "secret": "2.newsecret"}),
+        ] {
+            let item = serde_json::from_value(value).unwrap();
+            assert!(reencrypted_content(&entry, &item).is_err());
+        }
     }
 }
 
