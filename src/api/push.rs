@@ -15,7 +15,7 @@ use crate::{
     api::{ApiResult, EmptyResult, LogOutReason, UpdateType},
     db::{
         DbConn,
-        models::{AuthRequestId, Cipher, Device, Folder, PushId, Send, User, UserId},
+        models::{AuthRequestId, AuthenticatorEntry, Cipher, Device, Folder, PushId, Send, User, UserId},
     },
     http_client::make_http_request,
     util::{format_date, get_uuid},
@@ -247,6 +247,25 @@ pub async fn push_folder_update(ut: UpdateType, folder: &Folder, device: &Device
                 "id": folder.uuid,
                 "userId": folder.user_uuid,
                 "revisionDate": format_date(&folder.updated_at)
+            },
+            "clientType": null,
+            "installationId": null
+        })));
+    }
+}
+
+pub async fn push_authenticator_update(ut: UpdateType, entry: &AuthenticatorEntry, device: &Device, conn: &DbConn) {
+    if Device::check_user_has_push_device(&entry.user_uuid, conn).await {
+        tokio::task::spawn(send_to_push_relay(json!({
+            "userId": entry.user_uuid,
+            "organizationId": null,
+            "deviceId": device.push_uuid, // Should be the records unique uuid of the acting device (unique uuid per user/device)
+            "identifier": device.uuid, // Should be the acting device id (aka uuid per device/app)
+            "type": ut as i32,
+            "payload": {
+                "id": entry.uuid,
+                "userId": entry.user_uuid,
+                "revisionDate": format_date(&entry.revision_date)
             },
             "clientType": null,
             "installationId": null
