@@ -105,7 +105,18 @@ impl AuthenticatorEntry {
 /// Database methods
 impl AuthenticatorEntry {
     pub async fn save(&mut self, conn: &DbConn) -> EmptyResult {
-        User::update_uuid_revision(&self.user_uuid, conn).await;
+        self.save_with_user_revision(conn, true).await
+    }
+
+    /// Saves the entry without touching `users.updated_at`. Key rotation bumps that column once.
+    pub(crate) async fn save_without_user_revision(&mut self, conn: &DbConn) -> EmptyResult {
+        self.save_with_user_revision(conn, false).await
+    }
+
+    async fn save_with_user_revision(&mut self, conn: &DbConn, bump_user_revision: bool) -> EmptyResult {
+        if bump_user_revision {
+            User::update_uuid_revision(&self.user_uuid, conn).await;
+        }
         self.revision_date = Utc::now().naive_utc();
 
         db_run! { conn:
@@ -170,7 +181,7 @@ impl AuthenticatorEntry {
         .await
     }
 
-    pub async fn find_by_user(user_uuid: &UserId, conn: &DbConn) -> Vec<Self> {
+    pub async fn find_by_user(user_uuid: &UserId, conn: &DbConn) -> Result<Vec<Self>, crate::Error> {
         conn.run(move |conn| {
             authenticator_entries::table
                 .filter(authenticator_entries::user_uuid.eq(user_uuid))
@@ -180,7 +191,7 @@ impl AuthenticatorEntry {
                     authenticator_entries::uuid.asc(),
                 ))
                 .load::<Self>(conn)
-                .expect("Error loading authenticator entries")
+                .map_res("Error loading authenticator entries")
         })
         .await
     }
@@ -263,5 +274,51 @@ mod json_tests {
                 "sortOrder",
             ]
         );
+    }
+}
+
+#[cfg(all(test, sqlite))]
+mod revision_tests {
+    use chrono::Datelike;
+    use diesel::connection::SimpleConnection;
+
+    use super::*;
+    use crate::db::test_db;
+
+    #[test]
+    fn save_without_user_revision_does_not_bump_and_rolls_back() {
+        test_db::run(async |db| {
+            let conn = db.conn();
+            let mut user = User::new("rev@example.com", None);
+            user.save(&conn).await.unwrap();
+            conn.run(|c| c.batch_execute("UPDATE users SET updated_at='2000-01-01 00:00:00'")).await.unwrap();
+            let mut entry = AuthenticatorEntry::new(
+                user.uuid.clone(),
+                AuthenticatorEntryFields {
+                    name: String::from("2.AAAA|AAAA|AAAA"),
+                    issuer: None,
+                    secret: String::from("2.AAAA|AAAA|AAAB"),
+                    algorithm: String::from("SHA1"),
+                    digits: 6,
+                    period: 30,
+                    notes: None,
+                    favorite: false,
+                    sort_order: 0,
+                },
+            );
+            entry.save_without_user_revision(&conn).await.unwrap();
+            assert_eq!(User::find_by_uuid(&user.uuid, &conn).await.unwrap().updated_at.year(), 2000);
+            let original = entry.secret.clone();
+            let failed: Result<(), crate::Error> = conn
+                .transaction(async || {
+                    entry.secret = String::from("2.AAAA|AAAA|AAAZ");
+                    entry.save_without_user_revision(&conn).await?;
+                    err!("rollback authenticator write");
+                })
+                .await;
+            assert!(failed.is_err());
+            let reloaded = AuthenticatorEntry::find_by_uuid_and_user(&entry.uuid, &user.uuid, &conn).await.unwrap();
+            assert_eq!(reloaded.secret, original);
+        });
     }
 }

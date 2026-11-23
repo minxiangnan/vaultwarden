@@ -80,6 +80,11 @@ pub struct User {
     pub security_version: Option<i32>,
     /// JSON `{"wrappedUserKey1", "wrappedUserKey2"}` for sessions that still hold the v1 user key. Opaque to us.
     pub v2_upgrade_token: Option<String>,
+
+    /// Previous master-key-wrapped user key, kept until authenticator entries are re-encrypted.
+    /// Only set by `rotate-user-keys`, where the master key does not change, so this stays unwrappable.
+    pub authenticator_legacy_key: Option<String>,
+    pub authenticator_legacy_key_id: Option<KeyId>,
 }
 
 #[derive(Identifiable, Queryable, Insertable)]
@@ -187,6 +192,8 @@ impl User {
             security_state: None,
             security_version: None,
             v2_upgrade_token: None,
+            authenticator_legacy_key: None,
+            authenticator_legacy_key_id: None,
         }
     }
 

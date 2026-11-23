@@ -168,10 +168,11 @@ pub(crate) async fn sync(
 
     // Official clients ignore unknown sync fields. The forked extension reads this list.
     let authenticator_entries_json: Vec<Value> = AuthenticatorEntry::find_by_user(&headers.user.uuid, &conn)
-        .await
+        .await?
         .iter()
         .map(AuthenticatorEntry::to_json)
         .collect();
+    let authenticator_key_rotation_json = super::authenticator::authenticator_key_rotation_json(&headers.user);
 
     let policies_json: Vec<Value> =
         OrgPolicy::find_confirmed_by_user(&headers.user.uuid, &conn).await.iter().map(OrgPolicy::to_json).collect();
@@ -229,6 +230,7 @@ pub(crate) async fn sync(
         "domains": domains_json,
         "sends": sends_json,
         "authenticatorEntries": authenticator_entries_json,
+        "authenticatorKeyRotation": authenticator_key_rotation_json,
         "userDecryption": user_decryption,
         "object": "sync"
     })))

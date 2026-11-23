@@ -223,6 +223,8 @@ table! {
         security_state -> Nullable<Text>,
         security_version -> Nullable<Integer>,
         v2_upgrade_token -> Nullable<Text>,
+        authenticator_legacy_key -> Nullable<Text>,
+        authenticator_legacy_key_id -> Nullable<Text>,
     }
 }
 

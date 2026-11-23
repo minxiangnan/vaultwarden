@@ -6,7 +6,7 @@ use crate::{
     auth::Headers,
     db::{
         DbConn,
-        models::{AuthenticatorEntry, AuthenticatorEntryFields, AuthenticatorEntryId},
+        models::{AuthenticatorEntry, AuthenticatorEntryFields, AuthenticatorEntryId, User},
     },
 };
 
@@ -26,6 +26,7 @@ use crate::{
 const DEFAULT_ALGORITHM: &str = "SHA1";
 const DEFAULT_DIGITS: i32 = 6;
 const DEFAULT_PERIOD: i32 = 30;
+// Kept in lockstep with the forked browser extension.
 const MIN_DIGITS: i32 = 5;
 const MAX_DIGITS: i32 = 10;
 const MIN_PERIOD: i32 = 1;
@@ -35,6 +36,8 @@ const MAX_ENCRYPTED_LEN: usize = 100_000;
 pub fn routes() -> Vec<rocket::Route> {
     routes![
         get_authenticator_entries,
+        get_authenticator_rotation,
+        put_authenticator_rotation,
         get_authenticator_entry,
         post_authenticator_entry,
         put_authenticator_entry,
@@ -43,15 +46,88 @@ pub fn routes() -> Vec<rocket::Route> {
 }
 
 #[get("/authenticator")]
-async fn get_authenticator_entries(headers: Headers, conn: DbConn) -> Json<Value> {
-    let entries = AuthenticatorEntry::find_by_user(&headers.user.uuid, &conn).await;
+async fn get_authenticator_entries(headers: Headers, conn: DbConn) -> JsonResult {
+    let entries = AuthenticatorEntry::find_by_user(&headers.user.uuid, &conn).await?;
     let entries_json: Vec<Value> = entries.iter().map(AuthenticatorEntry::to_json).collect();
 
-    Json(json!({
+    Ok(Json(json!({
         "data": entries_json,
         "object": "list",
         "continuationToken": null,
-    }))
+    })))
+}
+
+/// Pending re-encryption left by `rotate-user-keys`, which cannot carry authenticator entries.
+#[get("/authenticator/rotate")]
+#[expect(clippy::needless_pass_by_value, reason = "Rocket extracts Headers by value")]
+pub(crate) fn get_authenticator_rotation(headers: Headers) -> Json<Value> {
+    Json(authenticator_key_rotation_json(&headers.user))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AuthenticatorRotateRequest {
+    pub authenticator_entries: Vec<AuthenticatorRotationData>,
+}
+
+/// Finishes a `rotate-user-keys` deferral. The body is the same item shape as
+/// `accountData.authenticatorEntries`.
+#[put("/authenticator/rotate", data = "<data>")]
+pub(crate) async fn put_authenticator_rotation(
+    data: Json<AuthenticatorRotateRequest>,
+    headers: Headers,
+    conn: DbConn,
+    nt: Notify<'_>,
+) -> JsonResult {
+    if headers.user.authenticator_legacy_key.is_none() {
+        err!("Authenticator entries are not waiting for re-encryption.")
+    }
+    let data = data.into_inner();
+    let user_id = headers.user.uuid.clone();
+    let existing = AuthenticatorEntry::find_by_user(&user_id, &conn).await?;
+    super::accounts::validate_authenticator_rotation(&data.authenticator_entries, &existing, &user_id, &conn).await?;
+
+    let user = conn
+        .transaction(async || {
+            let mut existing = AuthenticatorEntry::find_by_user(&user_id, &conn).await?;
+            for item in &data.authenticator_entries {
+                let Some(saved) = existing.iter_mut().find(|entry| entry.uuid == item.id) else {
+                    err!("All existing authenticator entries must be included in the rotation")
+                };
+                let updated = reencrypted_content(saved, item)?;
+                saved.name = updated.name;
+                saved.issuer = updated.issuer;
+                saved.secret = updated.secret;
+                saved.notes = updated.notes;
+                saved.save_without_user_revision(&conn).await?;
+            }
+            let Some(mut user) = User::find_by_uuid(&user_id, &conn).await else {
+                err!("User not found")
+            };
+            user.authenticator_legacy_key = None;
+            user.authenticator_legacy_key_id = None;
+            user.save(&conn).await?;
+            Ok(user)
+        })
+        .await?;
+
+    nt.send_user_update(UpdateType::SyncVault, &user, headers.device.push_uuid.as_ref(), &conn).await;
+    let entries = AuthenticatorEntry::find_by_user(&user_id, &conn).await?;
+    let entries_json: Vec<Value> = entries.iter().map(AuthenticatorEntry::to_json).collect();
+    Ok(Json(json!({
+        "data": entries_json,
+        "object": "list",
+        "continuationToken": null,
+    })))
+}
+
+pub(crate) fn authenticator_key_rotation_json(user: &User) -> Value {
+    json!({
+        "required": user.authenticator_legacy_key.is_some(),
+        "wrappedOldUserKey": user.authenticator_legacy_key,
+        "oldUserKeyId": user.authenticator_legacy_key_id,
+        "object": "authenticatorKeyRotation",
+    })
 }
 
 #[get("/authenticator/<entry_id>")]
@@ -170,18 +246,39 @@ fn validate_enc_string(value: String, field: &str) -> ApiResult<String> {
     Ok(value)
 }
 
+/// Bitwarden EncString: `{type}.{segments}` where segments are base64 pieces separated by `|`.
+///
+/// Type 0 is `iv|ct`. Types 1 and 2 are `iv|ct|mac`. Types 3 and 4 are one RSA blob. Types 5 and 6
+/// are `data|mac`. Type 7 is one COSE blob and may be standard or URL-safe base64.
 fn is_enc_string(value: &str) -> bool {
     let Some((enc_type, payload)) = value.split_once('.') else {
         return false;
     };
-    matches!(enc_type, "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7")
-        && !payload.is_empty()
-        && payload.bytes().all(|byte| {
-            matches!(
-                byte,
-                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'+' | b'/' | b'=' | b'-' | b'_' | b'|' | b'.'
-            )
-        })
+    if payload.is_empty() || payload.bytes().any(|byte| byte.is_ascii_whitespace()) {
+        return false;
+    }
+    let segments: Vec<&str> = payload.split('|').collect();
+    let url_safe = enc_type == "7";
+    // 0 is iv|ct, 5 and 6 are data|mac: both are two segments. 1 and 2 are iv|ct|mac.
+    let expected = match enc_type {
+        "1" | "2" => 3,
+        "3" | "4" | "7" => 1,
+        "0" | "5" | "6" => 2,
+        _ => return false,
+    };
+    segments.len() == expected && segments.iter().all(|segment| is_base64_segment(segment, url_safe))
+}
+
+fn is_base64_segment(segment: &str, url_safe: bool) -> bool {
+    if segment.is_empty() {
+        return false;
+    }
+    if data_encoding::BASE64.decode(segment.as_bytes()).is_ok() {
+        return true;
+    }
+    url_safe
+        && (data_encoding::BASE64URL.decode(segment.as_bytes()).is_ok()
+            || data_encoding::BASE64URL_NOPAD.decode(segment.as_bytes()).is_ok())
 }
 
 fn normalize_algorithm(value: Option<String>) -> ApiResult<String> {
@@ -300,7 +397,7 @@ fn normalize_period(value: Option<i32>) -> ApiResult<i32> {
 mod validation_tests {
     use super::*;
 
-    const ENC: &str = "2.iv|ct|mac";
+    const ENC: &str = "2.AAAA|AAAA|AAAA";
 
     fn request(value: Value) -> AuthenticatorEntryData {
         serde_json::from_value(value).unwrap()
@@ -320,10 +417,10 @@ mod validation_tests {
         assert!(fields.notes.is_none());
 
         let fields = request(json!({
-            "name": "0.abc=",
-            "secret": "7.abc-_",
+            "name": "0.AAAA|AAAA",
+            "secret": "7.YWJjZA",
             "issuer": "",
-            "notes": "2.note",
+            "notes": "2.AAAA|AAAA|AAAB",
             "algorithm": "SHA512",
             "digits": MIN_DIGITS,
             "period": MAX_PERIOD,
@@ -338,7 +435,7 @@ mod validation_tests {
         assert!(fields.favorite);
         assert_eq!(fields.sort_order, -2);
         assert!(fields.issuer.is_none());
-        assert_eq!(fields.notes.as_deref(), Some("2.note"));
+        assert_eq!(fields.notes.as_deref(), Some("2.AAAA|AAAA|AAAB"));
     }
 
     #[test]
@@ -352,6 +449,9 @@ mod validation_tests {
             json!({"name": "2.", "secret": ENC}),
             json!({"name": "8.abc", "secret": ENC}),
             json!({"name": "2.has space", "secret": ENC}),
+            json!({"name": "2.AAAA|AAAA", "secret": ENC}),
+            json!({"name": "0.AAAA", "secret": ENC}),
+            json!({"name": "3.AAAA|AAAA", "secret": ENC}),
             json!({"name": ENC, "secret": ENC, "algorithm": "sha1"}),
             json!({"name": ENC, "secret": ENC, "algorithm": ""}),
             json!({"name": ENC, "secret": ENC, "digits": MIN_DIGITS - 1}),
@@ -386,9 +486,9 @@ mod validation_tests {
         };
         let rotated: AuthenticatorRotationData = serde_json::from_value(json!({
             "id": entry.uuid,
-            "name": "2.newname",
-            "issuer": "2.newissuer",
-            "secret": "2.newsecret",
+            "name": "2.AAAA|AAAA|AAAC",
+            "issuer": "2.AAAA|AAAA|AAAD",
+            "secret": "2.AAAA|AAAA|AAAE",
             "algorithm": "SHA1",
             "digits": 6,
             "period": 30,
@@ -397,16 +497,17 @@ mod validation_tests {
         }))
         .unwrap();
         let updated = reencrypted_content(&entry, &rotated).unwrap();
-        assert_eq!(updated.name, "2.newname");
-        assert_eq!(updated.issuer.as_deref(), Some("2.newissuer"));
-        assert_eq!(updated.secret, "2.newsecret");
+        assert_eq!(updated.name, "2.AAAA|AAAA|AAAC");
+        assert_eq!(updated.issuer.as_deref(), Some("2.AAAA|AAAA|AAAD"));
+        assert_eq!(updated.secret, "2.AAAA|AAAA|AAAE");
         assert!(updated.notes.is_none());
 
         for value in [
-            json!({"id": entry.uuid, "name": "2.newname", "secret": "2.newsecret"}),
-            json!({"id": entry.uuid, "name": "2.newname", "issuer": "2.newissuer", "secret": "2.newsecret", "digits": 8}),
-            json!({"id": entry.uuid, "name": "2.newname", "issuer": "2.newissuer", "secret": "2.newsecret", "notes": "2.notes"}),
-            json!({"id": entry.uuid, "name": "GitHub", "issuer": "2.newissuer", "secret": "2.newsecret"}),
+            json!({"id": entry.uuid, "name": "2.AAAA|AAAA|AAAC", "secret": "2.AAAA|AAAA|AAAE"}),
+            json!({"id": entry.uuid, "name": "2.AAAA|AAAA|AAAC", "issuer": "2.AAAA|AAAA|AAAD", "secret": "2.AAAA|AAAA|AAAE", "digits": 8}),
+            json!({"id": entry.uuid, "name": "2.AAAA|AAAA|AAAC", "issuer": "2.AAAA|AAAA|AAAD", "secret": "2.AAAA|AAAA|AAAE", "notes": "2.AAAA|AAAA|AAAF"}),
+            json!({"id": entry.uuid, "name": "GitHub", "issuer": "2.AAAA|AAAA|AAAD", "secret": "2.AAAA|AAAA|AAAE"}),
+            json!({"id": entry.uuid, "name": "2.AAAA|AAAA", "issuer": "2.AAAA|AAAA|AAAD", "secret": "2.AAAA|AAAA|AAAE"}),
         ] {
             let item = serde_json::from_value(value).unwrap();
             assert!(reencrypted_content(&entry, &item).is_err());
@@ -432,7 +533,7 @@ mod api_tests {
         },
     };
 
-    const ENC: &str = "2.iv|ciphertext|mac";
+    const ENC: &str = "2.AAAA|AAAA|AAAA";
 
     fn headers_for(user: User) -> Headers {
         Headers {
@@ -470,7 +571,7 @@ mod api_tests {
                     .await
                     .is_err()
             );
-            assert_eq!(AuthenticatorEntry::find_by_user(&owner_id, &conn).await.len(), 0);
+            assert_eq!(AuthenticatorEntry::find_by_user(&owner_id, &conn).await.unwrap().len(), 0);
 
             let created = post_authenticator_entry(
                 Json(serde_json::from_value(json!({"name": ENC, "secret": ENC, "sortOrder": 5})).unwrap()),
@@ -494,13 +595,13 @@ mod api_tests {
             let second = post_authenticator_entry(
                 Json(
                     serde_json::from_value(json!({
-                        "name": "2.other",
-                        "secret": "2.othersecret",
-                        "issuer": "2.issuer",
+                        "name": "2.AAAA|AAAA|AAAB",
+                        "secret": "2.AAAA|AAAA|AAAC",
+                        "issuer": "2.AAAA|AAAA|AAAD",
                         "algorithm": "SHA256",
                         "digits": 8,
                         "period": 60,
-                        "notes": "2.notes",
+                        "notes": "2.AAAA|AAAA|AAAE",
                         "favorite": true,
                         "sortOrder": 1
                     }))
@@ -515,9 +616,10 @@ mod api_tests {
             .into_inner();
             let second_id: AuthenticatorEntryId = second["id"].as_str().unwrap().to_owned().into();
             assert_eq!(second["algorithm"], "SHA256");
-            assert_eq!(second["issuer"], "2.issuer");
+            assert_eq!(second["issuer"], "2.AAAA|AAAA|AAAD");
 
-            let list = get_authenticator_entries(headers(&owner_id, &conn).await, db.conn()).await.into_inner();
+            let list =
+                get_authenticator_entries(headers(&owner_id, &conn).await, db.conn()).await.unwrap().into_inner();
             assert_eq!(list["object"], "list");
             assert!(list["continuationToken"].is_null());
             let data = list["data"].as_array().unwrap();
@@ -531,19 +633,23 @@ mod api_tests {
                 .await
                 .unwrap()
                 .into_inner();
-            assert_eq!(fetched["secret"], "2.othersecret");
+            assert_eq!(fetched["secret"], "2.AAAA|AAAA|AAAC");
             assert!(
                 get_authenticator_entry(second_id.clone(), headers(&other_id, &conn).await, db.conn()).await.is_err()
             );
             assert_eq!(
-                get_authenticator_entries(headers(&other_id, &conn).await, db.conn()).await.into_inner()["data"]
+                get_authenticator_entries(headers(&other_id, &conn).await, db.conn())
+                    .await
+                    .unwrap()
+                    .into_inner()["data"]
                     .as_array()
                     .unwrap()
                     .len(),
                 0
             );
 
-            let unchanged = serde_json::from_value(json!({"name": "2.nope", "secret": "2.nope"})).unwrap();
+            let unchanged =
+                serde_json::from_value(json!({"name": "2.AAAA|AAAA|AAAF", "secret": "2.AAAA|AAAA|AAAF"})).unwrap();
             assert!(
                 put_authenticator_entry(
                     second_id.clone(),
@@ -562,12 +668,14 @@ mod api_tests {
             );
             assert_eq!(
                 AuthenticatorEntry::find_by_uuid_and_user(&second_id, &owner_id, &conn).await.unwrap().secret,
-                "2.othersecret"
+                "2.AAAA|AAAA|AAAC"
             );
 
             let updated = put_authenticator_entry(
                 second_id.clone(),
-                Json(serde_json::from_value(json!({"name": "2.renamed", "secret": "2.newsecret"})).unwrap()),
+                Json(
+                    serde_json::from_value(json!({"name": "2.AAAA|AAAA|AAAG", "secret": "2.AAAA|AAAA|AAAH"})).unwrap(),
+                ),
                 headers(&owner_id, &conn).await,
                 db.conn(),
                 notify,
@@ -575,8 +683,8 @@ mod api_tests {
             .await
             .unwrap()
             .into_inner();
-            assert_eq!(updated["name"], "2.renamed");
-            assert_eq!(updated["secret"], "2.newsecret");
+            assert_eq!(updated["name"], "2.AAAA|AAAA|AAAG");
+            assert_eq!(updated["secret"], "2.AAAA|AAAA|AAAH");
             assert_eq!(updated["issuer"], Value::Null);
             assert_eq!(updated["algorithm"], "SHA1");
             assert_eq!(updated["favorite"], false);
@@ -616,7 +724,7 @@ mod api_tests {
             assert!(get_authenticator_entry(first_id, headers(&owner_id, &conn).await, db.conn()).await.is_err());
 
             User::find_by_uuid(&owner_id, &conn).await.unwrap().delete(&conn).await.unwrap();
-            assert_eq!(AuthenticatorEntry::find_by_user(&owner_id, &conn).await.len(), 0);
+            assert_eq!(AuthenticatorEntry::find_by_user(&owner_id, &conn).await.unwrap().len(), 0);
         });
     }
 }
