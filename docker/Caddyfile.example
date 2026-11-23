@@ -1,0 +1,6 @@
+# Optional HTTPS reverse proxy. Caddy upgrades /notifications/hub and /mcp automatically.
+# Point DNS for vault.example.com at this machine, then:
+#   docker compose --profile https up -d
+vault.example.com {
+	reverse_proxy vaultwarden:8080
+}

@@ -32,6 +32,9 @@
                                     {{#if twoFactorEnabled}}
                                         <span class="badge bg-success me-2" title="2FA is enabled">2FA</span>
                                     {{/if}}
+                                    {{#if mcp_active}}
+                                        <span class="badge bg-warning text-dark me-2" title="An MCP access token can read opted-in TOTP codes">MCP</span>
+                                    {{/if}}
                                     {{#case _status 1}}
                                         <span class="badge bg-warning text-dark me-2" title="User is invited">Invited</span>
                                     {{/case}}
@@ -72,6 +75,9 @@
                             <span data-vw-user-uuid="{{id}}" data-vw-user-email="{{email}}">
                                 {{#if twoFactorEnabled}}
                                 <button type="button" class="btn btn-sm btn-link p-0 border-0 float-right" vw-remove2fa>Remove all 2FA</button><br>
+                                {{/if}}
+                                {{#if mcp_active}}
+                                <button type="button" class="btn btn-sm btn-link p-0 border-0 float-right" vw-revoke-mcp>Revoke MCP token</button><br>
                                 {{/if}}
                                 <button type="button" class="btn btn-sm btn-link p-0 border-0 float-right" vw-deauth-user>Deauthorize sessions</button><br>
                                 <button type="button" class="btn btn-sm btn-link p-0 border-0 float-right" vw-delete-user>Delete User</button><br>

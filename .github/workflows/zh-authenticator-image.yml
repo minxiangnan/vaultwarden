@@ -1,0 +1,61 @@
+name: zh-authenticator image
+
+on:
+  push:
+    tags:
+      - "v-zh-authenticator-*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  image:
+    name: Build ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push ${{ matrix.arch }}
+        run: |
+          docker buildx build \
+            --file docker/Dockerfile.zh \
+            --platform linux/${{ matrix.arch }} \
+            --tag ghcr.io/minxiangnan/vaultwarden:zh-authenticator-${{ matrix.arch }} \
+            --push \
+            .
+
+  manifest:
+    name: Publish multi-arch manifest
+    needs: image
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Combine amd64 and arm64
+        run: |
+          tags=(-t ghcr.io/minxiangnan/vaultwarden:zh-authenticator)
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            tags+=(-t "ghcr.io/minxiangnan/vaultwarden:${GITHUB_REF_NAME}")
+          fi
+          docker buildx imagetools create "${tags[@]}" \
+            ghcr.io/minxiangnan/vaultwarden:zh-authenticator-amd64 \
+            ghcr.io/minxiangnan/vaultwarden:zh-authenticator-arm64

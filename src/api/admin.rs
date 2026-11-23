@@ -24,8 +24,8 @@ use crate::{
     db::{
         ACTIVE_DB_TYPE, DbConn, DbConnType, backup_sqlite, get_sql_server_version,
         models::{
-            Attachment, Cipher, Collection, Device, Event, EventType, Group, Invitation, Membership, MembershipId,
-            MembershipType, OrgPolicy, Organization, OrganizationId, SsoUser, TwoFactor, User, UserId,
+            Attachment, Cipher, Collection, Device, Event, EventType, Group, Invitation, McpToken, Membership,
+            MembershipId, MembershipType, OrgPolicy, Organization, OrganizationId, SsoUser, TwoFactor, User, UserId,
             custom_roles_enabled,
         },
     },
@@ -59,6 +59,7 @@ pub fn routes() -> Vec<Route> {
         disable_user,
         enable_user,
         remove_2fa,
+        revoke_mcp,
         update_membership_type,
         update_revision_users,
         post_config,
@@ -392,6 +393,7 @@ async fn users_overview(_token: AdminToken, conn: DbConn) -> ApiResult<Html<Stri
         };
 
         usr["sso_identifier"] = json!(sso_u.map_or(String::new(), |u| u.identifier.to_string()));
+        usr["mcp_active"] = json!(McpToken::has_active(&u.uuid, &conn).await);
 
         // The clients are shown a Manager as a Custom member, but the admin panel tells the two roles apart
         let roles: HashMap<String, i32> = Membership::find_confirmed_by_user(&u.uuid, &conn)
@@ -528,6 +530,12 @@ async fn enable_user(user_id: UserId, _token: AdminToken, conn: DbConn) -> Empty
     user.enabled = true;
 
     user.save(&conn).await
+}
+
+#[post("/users/<user_id>/revoke-mcp", format = "application/json")]
+async fn revoke_mcp(user_id: UserId, _token: AdminToken, conn: DbConn) -> EmptyResult {
+    let _user = get_user_or_404(&user_id, &conn).await?;
+    crate::mcp::revoke_user(&user_id, &conn).await
 }
 
 #[post("/users/<user_id>/remove-2fa", format = "application/json")]

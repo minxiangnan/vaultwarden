@@ -300,7 +300,8 @@ impl<'r, R: 'r + Responder<'r, 'static> + Send> Responder<'r, 'static> for EtagC
 
 // Log all the routes from the main paths list, and the attachments endpoint
 // Effectively ignores, any static file route, and the alive endpoint
-const LOGGED_ROUTES: [&str; 7] = ["/api", "/admin", "/identity", "/icons", "/attachments", "/events", "/notifications"];
+const LOGGED_ROUTES: [&str; 8] =
+    ["/api", "/admin", "/identity", "/icons", "/attachments", "/events", "/notifications", "/mcp"];
 
 const MAX_LOGGED_QUERY_BYTES: usize = 100;
 

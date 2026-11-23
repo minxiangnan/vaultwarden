@@ -687,6 +687,16 @@ make_config! {
         client_suppress_onboarding:         bool, true,   def,    false;
     },
 
+    /// MCP access to opted-in TOTP codes |> Off unless set. Only entries the user explicitly opts in can be read, and only with that user's MCP access token.
+    mcp {
+        /// Enable MCP |> Expose POST /mcp and the /api/mcp management routes.
+        mcp_enabled:            bool,   true,   def,    false;
+        /// MCP replenish period (seconds) |> After the burst is used, one additional code read is allowed per this many seconds.
+        mcp_ratelimit_seconds:  u16,    true,   def,    2;
+        /// MCP burst |> How many code reads a token may make before the replenish period applies.
+        mcp_ratelimit_burst:    u16,    true,   def,    30;
+    },
+
     /// Advanced settings
     advanced {
         /// Client IP header |> If not present, the remote IP is used.
@@ -1328,6 +1338,22 @@ fn validate_config(cfg: &ConfigItems, on_update: bool) -> Result<(), Error> {
 
     if !cfg.purge_incomplete_sso_auth.is_empty() && cfg.purge_incomplete_sso_auth.parse::<Schedule>().is_err() {
         err!("`PURGE_INCOMPLETE_SSO_AUTH` is not a valid cron expression")
+    }
+
+    if cfg.mcp_ratelimit_seconds < 1 {
+        err!("`MCP_RATELIMIT_SECONDS` must be at least 1 second");
+    }
+    if cfg.mcp_ratelimit_burst < 1 {
+        err!("`MCP_RATELIMIT_BURST` must be at least 1");
+    }
+    if cfg.mcp_enabled {
+        let domain = cfg.domain.trim().to_ascii_lowercase();
+        let local = domain.contains("://localhost") || domain.contains("://127.0.0.1") || domain.contains("://[::1]");
+        if domain.starts_with("http://") && !local {
+            println!(
+                "[WARNING] MCP_ENABLED is set and DOMAIN is plain HTTP. The MCP access token is a bearer secret; put the server behind HTTPS."
+            );
+        }
     }
 
     if cfg.login_ratelimit_seconds < 1 {

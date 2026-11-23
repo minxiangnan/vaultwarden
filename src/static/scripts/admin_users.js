@@ -63,6 +63,24 @@ function remove2fa(event) {
     }
 }
 
+function revokeMcp(event) {
+    event.preventDefault();
+    event.stopPropagation();
+    const id = event.target.parentNode.dataset.vwUserUuid;
+    const email = event.target.parentNode.dataset.vwUserEmail;
+    if (!id || !email) {
+        alert("Required parameters not found!");
+        return false;
+    }
+    const confirmed = confirm(`Revoke the MCP access token for "${email}"? Opted-in codes stop working until the user creates a new token.`);
+    if (confirmed) {
+        _post(`${BASE_URL}/admin/users/${id}/revoke-mcp`,
+            "MCP token revoked",
+            "Error revoking MCP token"
+        );
+    }
+}
+
 function deauthUser(event) {
     event.preventDefault();
     event.stopPropagation();
@@ -243,6 +261,9 @@ function initUserTable() {
     });
     document.querySelectorAll("button[vw-deauth-user]").forEach(btn => {
         btn.addEventListener("click", deauthUser);
+    });
+    document.querySelectorAll("button[vw-revoke-mcp]").forEach(btn => {
+        btn.addEventListener("click", revokeMcp);
     });
     document.querySelectorAll("button[vw-delete-user]").forEach(btn => {
         btn.addEventListener("click", deleteUser);

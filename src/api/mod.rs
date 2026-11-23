@@ -2,6 +2,7 @@ mod admin;
 pub mod core;
 mod icons;
 mod identity;
+mod mcp;
 mod notifications;
 mod push;
 #[cfg(feature = "unsafe_test_mode")]
@@ -27,6 +28,7 @@ pub use crate::api::{
     core::{event_cleanup_job, events_routes as core_events_routes},
     icons::routes as icons_routes,
     identity::routes as identity_routes,
+    mcp::routes as mcp_routes,
     notifications::routes as notifications_routes,
     notifications::{AnonymousNotify, LogOutReason, Notify, UpdateType, WS_ANONYMOUS_SUBSCRIPTIONS, WS_USERS},
     push::{

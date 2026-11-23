@@ -399,8 +399,58 @@ table! {
     }
 }
 
+table! {
+    mcp_tokens (uuid) {
+        uuid -> Text,
+        user_uuid -> Text,
+        token_hash -> Text,
+        key_salt -> Text,
+        token_enc -> Nullable<Text>,
+        label -> Nullable<Text>,
+        created_at -> Timestamp,
+        revoked_at -> Nullable<Timestamp>,
+    }
+}
+
+table! {
+    mcp_entries (uuid) {
+        uuid -> Text,
+        user_uuid -> Text,
+        source -> Text,
+        source_id -> Text,
+        alias -> Text,
+        secret_ct -> Text,
+        issuer_ct -> Nullable<Text>,
+        account_ct -> Nullable<Text>,
+        host_ct -> Nullable<Text>,
+        algorithm -> Text,
+        digits -> Integer,
+        period -> Integer,
+        steam -> Bool,
+        created_at -> Timestamp,
+        updated_at -> Timestamp,
+    }
+}
+
+table! {
+    mcp_audit (uuid) {
+        uuid -> Text,
+        user_uuid -> Nullable<Text>,
+        token_uuid -> Nullable<Text>,
+        action -> Text,
+        alias -> Nullable<Text>,
+        success -> Bool,
+        detail -> Nullable<Text>,
+        ip -> Nullable<Text>,
+        created_at -> Timestamp,
+    }
+}
+
 joinable!(archives -> users (user_uuid));
 joinable!(authenticator_entries -> users (user_uuid));
+joinable!(mcp_tokens -> users (user_uuid));
+joinable!(mcp_entries -> users (user_uuid));
+joinable!(mcp_audit -> users (user_uuid));
 joinable!(archives -> ciphers (cipher_uuid));
 joinable!(attachments -> ciphers (cipher_uuid));
 joinable!(ciphers -> organizations (organization_uuid));
@@ -436,6 +486,9 @@ joinable!(user_signature_key_pairs -> users (user_uuid));
 allow_tables_to_appear_in_same_query!(
     archives,
     authenticator_entries,
+    mcp_tokens,
+    mcp_entries,
+    mcp_audit,
     attachments,
     ciphers,
     ciphers_collections,
