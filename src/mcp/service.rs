@@ -241,7 +241,8 @@ pub async fn search(session: &McpSession, query: &str, ip: &str, conn: &DbConn) 
 }
 
 /// Test hook: generate at a chosen unix time instead of the wall clock.
-#[cfg(test)]
+/// Only the SQLite tests call this. MySQL and PostgreSQL test builds must not compile it.
+#[cfg(all(test, sqlite))]
 pub async fn get_code_at(
     session: &McpSession,
     query: &str,
