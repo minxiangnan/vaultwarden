@@ -50,8 +50,16 @@ document.addEventListener("DOMContentLoaded", (/*event*/) => {
         "responsive": true,
         "lengthMenu": [
             [-1, 5, 10, 25, 50],
-            ["All", 5, 10, 25, 50]
+            ["全部", 5, 10, 25, 50]
         ],
+        "language": {
+            "search": "搜索",
+            "lengthMenu": "每页 _MENU_ 条",
+            "info": "第 _START_–_END_ 条，共 _TOTAL_ 条",
+            "infoEmpty": "没有记录",
+            "zeroRecords": "没有匹配的记录",
+            "paginate": { "first": "首页", "last": "末页", "next": "下页", "previous": "上页" }
+        },
         "pageLength": -1, // Default show all
         "columnDefs": [{
             "targets": [columnCount - 2, columnCount - 1], // Do not include the last two columns into the search/order features

@@ -7,18 +7,18 @@ function deleteUser(event) {
     const id = event.target.parentNode.dataset.vwUserUuid;
     const email = event.target.parentNode.dataset.vwUserEmail;
     if (!id || !email) {
-        alert("Required parameters not found!");
+        alert("缺少必要参数。");
         return false;
     }
-    const input_email = prompt(`To delete user "${email}", please type the email below`);
+    const input_email = prompt(`要删除用户「${email}」，请在下面输入该邮箱`);
     if (input_email != null) {
         if (input_email == email) {
             _post(`${BASE_URL}/admin/users/${id}/delete`,
-                "User deleted correctly",
-                "Error deleting user"
+                "用户已删除",
+                "删除用户失败"
             );
         } else {
-            alert("Wrong email, please try again");
+            alert("邮箱不一致，请重试。");
         }
     }
 }
@@ -29,7 +29,7 @@ function deleteSSOUser(event) {
     const id = event.target.parentNode.dataset.vwUserUuid;
     const email = event.target.parentNode.dataset.vwUserEmail;
     if (!id || !email) {
-        alert("Required parameters not found!");
+        alert("缺少必要参数。");
         return false;
     }
     const input_email = prompt(`To delete user "${email}" SSO association, please type the email below`);
@@ -40,7 +40,7 @@ function deleteSSOUser(event) {
                 "Error deleting user SSO association"
             );
         } else {
-            alert("Wrong email, please try again");
+            alert("邮箱不一致，请重试。");
         }
     }
 }
@@ -51,7 +51,7 @@ function remove2fa(event) {
     const id = event.target.parentNode.dataset.vwUserUuid;
     const email = event.target.parentNode.dataset.vwUserEmail;
     if (!id || !email) {
-        alert("Required parameters not found!");
+        alert("缺少必要参数。");
         return false;
     }
     const confirmed = confirm(`Are you sure you want to remove 2FA for "${email}"?`);
@@ -69,14 +69,14 @@ function revokeMcp(event) {
     const id = event.target.parentNode.dataset.vwUserUuid;
     const email = event.target.parentNode.dataset.vwUserEmail;
     if (!id || !email) {
-        alert("Required parameters not found!");
+        alert("缺少必要参数。");
         return false;
     }
-    const confirmed = confirm(`Revoke the MCP access token for "${email}"? Opted-in codes stop working until the user creates a new token.`);
+    const confirmed = confirm(`吊销「${email}」的 MCP 令牌？已放行的验证码会立刻停止读取，直到用户创建新令牌。`);
     if (confirmed) {
         _post(`${BASE_URL}/admin/users/${id}/revoke-mcp`,
-            "MCP token revoked",
-            "Error revoking MCP token"
+            "MCP 令牌已吊销",
+            "吊销 MCP 令牌失败"
         );
     }
 }
@@ -87,7 +87,7 @@ function deauthUser(event) {
     const id = event.target.parentNode.dataset.vwUserUuid;
     const email = event.target.parentNode.dataset.vwUserEmail;
     if (!id || !email) {
-        alert("Required parameters not found!");
+        alert("缺少必要参数。");
         return false;
     }
     const confirmed = confirm(`Are you sure you want to deauthorize sessions for "${email}"?`);
@@ -105,7 +105,7 @@ function disableUser(event) {
     const id = event.target.parentNode.dataset.vwUserUuid;
     const email = event.target.parentNode.dataset.vwUserEmail;
     if (!id || !email) {
-        alert("Required parameters not found!");
+        alert("缺少必要参数。");
         return false;
     }
     const confirmed = confirm(`Are you sure you want to disable user "${email}"? This will also deauthorize their sessions.`);
@@ -123,7 +123,7 @@ function enableUser(event) {
     const id = event.target.parentNode.dataset.vwUserUuid;
     const email = event.target.parentNode.dataset.vwUserEmail;
     if (!id || !email) {
-        alert("Required parameters not found!");
+        alert("缺少必要参数。");
         return false;
     }
     const confirmed = confirm(`Are you sure you want to enable user "${email}"?`);
@@ -165,7 +165,7 @@ function resendUserInvite(event) {
     const id = event.target.parentNode.dataset.vwUserUuid;
     const email = event.target.parentNode.dataset.vwUserEmail;
     if (!id || !email) {
-        alert("Required parameters not found!");
+        alert("缺少必要参数。");
         return false;
     }
     const confirmed = confirm(`Are you sure you want to resend invitation for "${email}"?`);
@@ -323,8 +323,16 @@ document.addEventListener("DOMContentLoaded", (/*event*/) => {
         "responsive": true,
         "lengthMenu": [
             [-1, 2, 5, 10, 25, 50],
-            ["All", 2, 5, 10, 25, 50]
+            ["全部", 2, 5, 10, 25, 50]
         ],
+        "language": {
+            "search": "搜索",
+            "lengthMenu": "每页 _MENU_ 条",
+            "info": "第 _START_–_END_ 条，共 _TOTAL_ 条",
+            "infoEmpty": "没有记录",
+            "zeroRecords": "没有匹配的记录",
+            "paginate": { "first": "首页", "last": "末页", "next": "下页", "previous": "上页" }
+        },
         "pageLength": -1, // Default show all
         "columnDefs": [{
             "targets": columnCount - 1, // Do not include the last column into the search/order features

@@ -1,17 +1,17 @@
 <main class="container-xxl">
     <div id="admin_token_warning" class="alert alert-warning alert-dismissible fade show d-none">
         <button type="button" class="btn-close" data-bs-target="admin_token_warning" data-bs-dismiss="alert" aria-label="Close"></button>
-        You are using a plain text `ADMIN_TOKEN` which is insecure.<br>
-        Please generate a secure Argon2 PHC string by using `vaultwarden hash` or `argon2`.<br>
-        See: <a href="https://github.com/dani-garcia/vaultwarden/wiki/Enabling-admin-page#secure-the-admin_token" target="_blank" rel="noopener noreferrer">Enabling admin page - Secure the `ADMIN_TOKEN`</a>
+        当前 ADMIN_TOKEN 是明文，不安全。<br>
+        请用 `vaultwarden hash` 或 `argon2` 生成 Argon2 PHC。<br>
+        参考：<a href="https://github.com/dani-garcia/vaultwarden/wiki/Enabling-admin-page#secure-the-admin_token" target="_blank" rel="noopener noreferrer">保护 ADMIN_TOKEN</a>
     </div>
-    <div id="config-block" class="align-items-center p-3 mb-3 bg-secondary rounded shadow">
+    <div id="config-block" class="vw-panel align-items-center p-3 mb-3 rounded">
         <div>
-            <h6 class="text-white mb-3">Configuration</h6>
-            <div class="small text-white mb-3">
-                <span class="font-weight-bolder">NOTE:</span> The settings here override the environment variables. Once saved, it's recommended to stop setting them to avoid confusion.<br>
-                This does not apply to the read-only section, which can only be set via environment variables.<br>
-                Settings which are overridden are shown with <span class="is-overridden-true alert-row px-1">a yellow colored background</span>.
+            <h6 class="mb-3">配置</h6>
+            <div class="small mb-3">
+                这里的设置会覆盖环境变量。保存后建议不再同时用环境变量设置同一项，以免混淆。<br>
+                只读项只能用环境变量设置。字段名保持英文，和变量名一致。<br>
+                已被覆盖的项用 <span class="is-overridden-true alert-row px-1">浅黄背景</span> 标出。
             </div>
 
             <form class="form needs-validation" id="config-form" novalidate>
@@ -30,7 +30,7 @@
                                 <input class="form-control conf-{{type}}" id="input_{{name}}" type="{{type}}"
                                     name="{{name}}" value="{{value}}" {{#if default}} placeholder="Default: {{default}}"{{/if}}>
                                 {{#case type "password"}}
-                                    <button class="btn btn-outline-secondary input-group-text" type="button" data-vw-pw-toggle="input_{{name}}">Show/hide</button>
+                                    <button class="btn btn-outline-secondary input-group-text" type="button" data-vw-pw-toggle="input_{{name}}">显示或隐藏</button>
                                 {{/case}}
                                 </div>
                             </div>
@@ -54,7 +54,7 @@
                                 <label for="smtp-test-email" class="col-sm-3 col-form-label">Test SMTP</label>
                                 <div class="col-sm-8 input-group">
                                     <input class="form-control" id="smtp-test-email" type="email" placeholder="Enter test email" required spellcheck="false">
-                                    <button type="button" class="btn btn-outline-primary input-group-text" id="smtpTest">Send test email</button>
+                                    <button type="button" class="btn btn-outline-primary input-group-text" id="smtpTest">发送测试邮件</button>
                                     <div class="invalid-tooltip">Please provide a valid email address</div>
                                 </div>
                             </div>
@@ -130,13 +130,13 @@
                             how to perform complete backups, refer to the wiki page on
                             <a href="https://github.com/dani-garcia/vaultwarden/wiki/Backing-up-your-vault" target="_blank" rel="noopener noreferrer">backups</a>.
                         </div>
-                        <button type="button" class="btn btn-primary" id="backupDatabase">Backup Database</button>
+                        <button type="button" class="btn btn-primary" id="backupDatabase">备份数据库</button>
                     </div>
                 </div>
                 {{/if}}
 
-                <button type="submit" class="btn btn-primary">Save</button>
-                <button type="button" class="btn btn-danger float-end" id="deleteConf">Reset defaults</button>
+                <button type="submit" class="btn btn-primary">保存</button>
+                <button type="button" class="btn btn-primary float-end" id="deleteConf">恢复默认</button>
             </form>
         </div>
     </div>

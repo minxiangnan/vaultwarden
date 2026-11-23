@@ -86,3 +86,132 @@ img {
     display: block;
     overflow: visible;
 }
+
+/* Cream / terracotta admin. Light only: no black bar, no dark panels. */
+:root,
+[data-bs-theme="light"],
+[data-bs-theme="dark"] {
+    --bs-body-bg: #faf9f5;
+    --bs-body-color: #3d3929;
+    --bs-emphasis-color: #3d3929;
+    --bs-emphasis-color-rgb: 61, 57, 41;
+    --bs-secondary-color: #6b675c;
+    --bs-tertiary-color: #6b675c;
+    --bs-border-color: #e8e6dc;
+    --bs-primary: #c4532a;
+    --bs-primary-rgb: 196, 83, 42;
+    --bs-link-color: #c4532a;
+    --bs-link-hover-color: #a34a24;
+    --bs-secondary-bg: #faf9f5;
+    --bs-tertiary-bg: #f6f1ea;
+}
+
+body {
+    background: #faf9f5 !important;
+    color: #3d3929 !important;
+}
+
+.navbar {
+    background: #faf9f5 !important;
+    border-bottom: 1px solid #e8e6dc;
+    box-shadow: none !important;
+}
+
+.navbar .navbar-brand,
+.navbar .nav-link,
+.navbar .btn {
+    color: #3d3929 !important;
+}
+
+.navbar .nav-link.active,
+.navbar .nav-link:hover {
+    color: #c4532a !important;
+}
+
+.navbar-toggler {
+    border-color: #e8e6dc;
+}
+
+.navbar-toggler-icon {
+    background-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 30 30'%3e%3cpath stroke='%233d3929' stroke-linecap='round' stroke-miterlimit='10' stroke-width='2' d='M4 7h22M4 15h22M4 23h22'/%3e%3c/svg%3e");
+}
+
+.vw-panel,
+#config-block,
+#inviteUserFormBlock,
+.bg-secondary {
+    background: #faf9f5 !important;
+    color: #3d3929 !important;
+    border: 1px solid #e8e6dc !important;
+    box-shadow: none !important;
+}
+
+#config-block .text-white,
+#config-block h6,
+#inviteUserFormBlock,
+#inviteUserFormBlock h6,
+#inviteUserFormBlock small,
+.bg-secondary,
+.bg-secondary .text-white,
+.bg-secondary .text-white-50 {
+    color: #3d3929 !important;
+}
+
+.card,
+.modal-content,
+.dropdown-menu,
+.table {
+    background: #fffdf8;
+    color: #3d3929;
+    border-color: #e8e6dc;
+}
+
+.table-striped > tbody > tr:nth-of-type(odd) > * {
+    --bs-table-bg-type: #f6f1ea;
+    color: #3d3929;
+}
+
+.btn-primary,
+.btn-danger,
+.btn-info {
+    background: #c4532a !important;
+    border-color: #c4532a !important;
+    color: #fffdf8 !important;
+}
+
+.btn-primary:hover,
+.btn-danger:hover,
+.btn-info:hover {
+    background: #d97757 !important;
+    border-color: #d97757 !important;
+    color: #fffdf8 !important;
+}
+
+.btn-secondary,
+.btn-outline-secondary {
+    background: #faf9f5 !important;
+    border-color: #e8e6dc !important;
+    color: #3d3929 !important;
+}
+
+.btn-link,
+.vw-actions .btn-link {
+    color: #c4532a !important;
+}
+
+.vw-badge {
+    background: #f6e7df;
+    color: #3d3929;
+}
+
+.form-control,
+.form-select {
+    background: #fffdf8;
+    border-color: #e8e6dc;
+    color: #3d3929;
+}
+
+.card-header {
+    background: #f6f1ea;
+    color: #3d3929;
+}

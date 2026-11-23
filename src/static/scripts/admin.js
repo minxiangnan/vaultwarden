@@ -76,21 +76,10 @@ function _delete(url, successMsg, errMsg, body, reload_page = true) {
 const getStoredTheme = () => localStorage.getItem("theme");
 const setStoredTheme = theme => localStorage.setItem("theme", theme);
 
-const getPreferredTheme = () => {
-    const storedTheme = getStoredTheme();
-    if (storedTheme) {
-        return storedTheme;
-    }
+const getPreferredTheme = () => "light";
 
-    return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
-};
-
-const setTheme = theme => {
-    if (theme === "auto" && window.matchMedia("(prefers-color-scheme: dark)").matches) {
-        document.documentElement.setAttribute("data-bs-theme", "dark");
-    } else {
-        document.documentElement.setAttribute("data-bs-theme", theme);
-    }
+const setTheme = _theme => {
+    document.documentElement.setAttribute("data-bs-theme", "light");
 };
 
 setTheme(getPreferredTheme());

@@ -1,5 +1,7 @@
 body {
     padding-top: 75px;
+    background: #faf9f5;
+    color: #3d3929;
 }
 .vaultwarden-icon {
     width: 48px;
@@ -10,7 +12,20 @@ body {
 }
 .footer {
     padding: 40px 0 40px 0;
-    border-top: 1px solid #dee2e6;
+    border-top: 1px solid #e8e6dc;
+}
+
+.navbar {
+    background: #faf9f5;
+    border-bottom: 1px solid #e8e6dc;
+}
+
+.navbar .navbar-brand {
+    color: #3d3929;
+}
+
+a {
+    color: #c4532a;
 }
 .container {
     max-width: 980px;
