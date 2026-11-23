@@ -29,6 +29,9 @@ export DOMAIN="$BASE"
 export SIGNUPS_ALLOWED=true
 export SIGNUPS_VERIFY=false
 export WEB_VAULT_ENABLED=false
+# Each logged-in device opens its own /notifications/hub socket. The default is already on;
+# set it here so this server cannot be started with realtime sync accidentally disabled.
+export ENABLE_WEBSOCKET=true
 export LOG_LEVEL="${LOG_LEVEL:-info}"
 
 if ! curl -sf "$BASE/alive" >/dev/null 2>&1; then
