@@ -35,6 +35,7 @@ jobs:
           docker buildx build \
             --file docker/Dockerfile.zh \
             --platform linux/${{ matrix.arch }} \
+            --build-arg VW_VERSION="${GITHUB_REF_NAME}" \
             --tag ghcr.io/minxiangnan/vaultwarden:zh-authenticator-${{ matrix.arch }} \
             --push \
             .
