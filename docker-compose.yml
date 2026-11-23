@@ -1,0 +1,31 @@
+# 自建带验证器同步的 Vaultwarden。
+# 说明见 docs/zh-authenticator-deploy.md。
+#
+#   export ADMIN_TOKEN="$(openssl rand -base64 32)"
+#   export DOMAIN="https://vault.example.com"
+#   docker compose build
+#   docker compose up -d
+#
+# 容器只提供 HTTP。请在前面加 HTTPS 反向代理，并把 /notifications/hub 升级为 WebSocket。
+
+services:
+  vaultwarden:
+    image: vaultwarden-zh:local
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      DOMAIN: ${DOMAIN:-https://vault.example.com}
+      SIGNUPS_ALLOWED: ${SIGNUPS_ALLOWED:-true}
+      SIGNUPS_VERIFY: ${SIGNUPS_VERIFY:-false}
+      ENABLE_WEBSOCKET: "true"
+      ADMIN_TOKEN: ${ADMIN_TOKEN:?请设置 ADMIN_TOKEN}
+      WEB_VAULT_ENABLED: ${WEB_VAULT_ENABLED:-true}
+      ROCKET_PROFILE: release
+      ROCKET_ADDRESS: 0.0.0.0
+      ROCKET_PORT: 80
+    volumes:
+      - ./vw-data:/data
+    ports:
+      - "${HOST_PORT:-8080}:80"
