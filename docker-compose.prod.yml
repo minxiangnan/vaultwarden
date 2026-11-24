@@ -1,0 +1,91 @@
+# Production stack: Vaultwarden on a private network, Caddy on 80/443.
+# Read docs/zh-production.md, then:
+#
+#   cp .env.example .env
+#   docker compose -f docker-compose.prod.yml run --rm --no-deps --entrypoint /vaultwarden vaultwarden hash
+#   docker compose -f docker-compose.prod.yml up -d
+#
+# ADMIN_TOKEN and SMTP_PASSWORD stay in .env. They are not interpolated here,
+# because an Argon2 hash contains `$` and Compose would eat it.
+
+name: vaultwarden
+
+services:
+  vaultwarden:
+    image: ghcr.io/minxiangnan/vaultwarden:${VW_IMAGE_TAG:-zh-authenticator}
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.zh
+      args:
+        VW_VERSION: ${VW_VERSION:-v-zh-authenticator-1.2.2}
+        VW_FEATURES: ${VW_FEATURES:-sqlite}
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: true
+    environment:
+      DATA_FOLDER: /data
+      ROCKET_PROFILE: release
+      ROCKET_ADDRESS: 0.0.0.0
+      ROCKET_PORT: "8080"
+      WEB_VAULT_ENABLED: "false"
+      ENABLE_WEBSOCKET: "true"
+      IP_HEADER: X-Real-IP
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      EXTENDED_LOGGING: ${EXTENDED_LOGGING:-false}
+      SIGNUPS_ALLOWED: ${SIGNUPS_ALLOWED:-false}
+      SIGNUPS_VERIFY: ${SIGNUPS_VERIFY:-false}
+      INVITATIONS_ALLOWED: ${INVITATIONS_ALLOWED:-true}
+      MCP_ENABLED: ${MCP_ENABLED:-true}
+    volumes:
+      - vw-data:/data
+    expose:
+      - "8080"
+    healthcheck:
+      test: ["CMD", "/healthcheck.sh"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - internal
+
+  caddy:
+    image: caddy:2.10.2
+    restart: unless-stopped
+    environment:
+      DOMAIN_HOST: ${DOMAIN_HOST:?在 .env 设置 DOMAIN_HOST，例如 vault.example.com}
+      ACME_EMAIL: ${ACME_EMAIL:-}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./docker/Caddyfile.prod:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      vaultwarden:
+        condition: service_healthy
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    networks:
+      - internal
+
+volumes:
+  vw-data:
+  caddy-data:
+  caddy-config:
+
+networks:
+  internal:

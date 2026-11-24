@@ -314,6 +314,10 @@ async fn get_user_or_404(user_id: &UserId, conn: &DbConn) -> ApiResult<User> {
 #[post("/invite", format = "application/json", data = "<data>")]
 async fn invite_user(data: Json<InviteData>, _token: AdminToken, conn: DbConn) -> JsonResult {
     async fn generate_invite(user: &User, conn: &DbConn) -> EmptyResult {
+        // The invitation row is what lets the browser extension and Android app
+        // finish registration while public signups stay closed. The email link
+        // still works when a web vault is mounted.
+        Invitation::new(&user.email).save(conn).await?;
         if CONFIG.mail_enabled() {
             let org_id: OrganizationId = if CONFIG.sso_enabled() {
                 FAKE_SSO_IDENTIFIER.into()
@@ -323,8 +327,7 @@ async fn invite_user(data: Json<InviteData>, _token: AdminToken, conn: DbConn) -
             let member_id: MembershipId = FAKE_ADMIN_UUID.to_owned().into();
             mail::send_invite(user, org_id, member_id, &CONFIG.invitation_org_name(), None).await
         } else {
-            let invitation = Invitation::new(&user.email);
-            invitation.save(conn).await
+            Ok(())
         }
     }
 
@@ -556,6 +559,7 @@ async fn resend_user_invite(user_id: UserId, _token: AdminToken, conn: DbConn) -
             err_code!("User already accepted invitation", Status::BadRequest.code);
         }
 
+        Invitation::new(&user.email).save(&conn).await?;
         if CONFIG.mail_enabled() {
             let org_id: OrganizationId = if CONFIG.sso_enabled() {
                 FAKE_SSO_IDENTIFIER.into()

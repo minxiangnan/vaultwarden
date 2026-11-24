@@ -327,26 +327,37 @@ async fn read_code_at(
 
 fn code_for_entry(session: &McpSession, entry: &McpEntry, unix_time: u64, kind: &str) -> Result<Value, String> {
     let aad = crypto::aad(&session.user_uuid.to_string(), &entry.source, &entry.source_id, &entry.alias, "secret");
-    let mut secret = session
+    let secret = session
         .key
         .open(&aad, &entry.secret_ct)
         .map_err(|()| "这条验证码无法用当前令牌解密。请在扩展里重新打开「允许 MCP 读取」。".to_owned())?;
-    let secret_text = String::from_utf8(secret.clone()).map_err(|_| "密钥不是文本".to_owned())?;
-    crypto::zeroize(&mut secret);
-    let raw = totp::decode_base32_secret(&secret_text).map_err(|_| "密钥不是有效的 Base32".to_owned())?;
+    let secret_text = match String::from_utf8(secret) {
+        Ok(text) => text,
+        Err(err) => {
+            let mut bytes = err.into_bytes();
+            crypto::zeroize(&mut bytes);
+            return Err("密钥不是文本".to_owned());
+        }
+    };
+    let Ok(mut raw) = totp::decode_base32_secret(&secret_text) else {
+        let mut bytes = secret_text.into_bytes();
+        crypto::zeroize(&mut bytes);
+        return Err("密钥不是有效的 Base32".to_owned());
+    };
     let mut secret_bytes = secret_text.into_bytes();
     crypto::zeroize(&mut secret_bytes);
-    let generated = totp::generate(
+    let Ok(generated) = totp::generate(
         &entry.algorithm,
         &raw,
         u32::try_from(entry.digits).unwrap_or(6),
         u64::try_from(entry.period).unwrap_or(30),
         entry.steam,
         unix_time,
-    )
-    .map_err(|_| "无法计算验证码".to_owned())?;
-    let mut raw_secret = raw;
-    crypto::zeroize(&mut raw_secret);
+    ) else {
+        crypto::zeroize(&mut raw);
+        return Err("无法计算验证码".to_owned());
+    };
+    crypto::zeroize(&mut raw);
     let fields = metadata(session, entry);
     Ok(protocol::tool_ok(json!({
         "code": generated.code,

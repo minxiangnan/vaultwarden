@@ -2,6 +2,8 @@
 
 这个分支在上游 Vaultwarden 上增加了验证器条目，以及一个可选的 MCP 端点。AI 客户端只能读取你在扩展里明确放行的验证码。请使用本仓库的镜像或二进制，不要用 Docker Hub 上的 `vaultwarden/server`。
 
+有域名的生产环境请按 [docs/zh-production.md](zh-production.md) 部署。下面是本机试用。生产环境不要临时打开注册。
+
 ## 最短启动
 
 在仓库根目录执行。`ADMIN_TOKEN` 是 `/admin` 的口令，`DOMAIN` 必须和浏览器地址栏里的源一致，带 `https://`，末尾不要斜杠。
