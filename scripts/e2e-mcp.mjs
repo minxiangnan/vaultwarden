@@ -1,6 +1,8 @@
 // Register, opt one authenticator entry into MCP, and read the code over /mcp.
 // The wrapping uses the same WebCrypto steps as the browser extension.
 
+import { spawn } from "node:child_process";
+
 import { decodeBase32, mcpAad, sealField, totp } from "./mcp-crypto.mjs";
 
 const base = process.env.VW_BASE ?? "http://127.0.0.1:8123";
@@ -181,6 +183,63 @@ async function main() {
   }
   console.log("get_totp_code", body.alias, body.code, "remaining", body.seconds_remaining);
 
+  const listedAliases = await mcp(token, {
+    jsonrpc: "2.0",
+    id: 7,
+    method: "tools/call",
+    params: { name: "list_totp_aliases", arguments: {} },
+  });
+  const aliases = listedAliases.json.result.structuredContent.aliases.map((item) => item.alias).sort();
+  if (aliases.join() !== "github,gitlab" || JSON.stringify(listedAliases.json.result).includes(secret)) {
+    fail(`alias list ${JSON.stringify(listedAliases.json.result.structuredContent)}`);
+  }
+  console.log("list_totp_aliases", aliases.join(", "));
+
+  const six = totp("SHA1", raw, 6, 30, Math.floor(Date.now() / 1000));
+  const githubCode = await mcp(token, {
+    jsonrpc: "2.0",
+    id: 8,
+    method: "tools/call",
+    params: { name: "get_totp_code", arguments: { alias: "github" } },
+  });
+  const githubBody = githubCode.json.result.structuredContent;
+  if (githubBody.code !== six.code || githubBody.code.length !== 6) {
+    const retry = totp("SHA1", raw, 6, 30, Math.floor(Date.now() / 1000));
+    const again = await mcp(token, {
+      jsonrpc: "2.0",
+      id: 9,
+      method: "tools/call",
+      params: { name: "get_totp_code", arguments: { alias: "github" } },
+    });
+    if (again.json.result.structuredContent.code !== retry.code) {
+      fail(`6-digit mismatch server=${again.json.result.structuredContent.code} local=${retry.code}`);
+    }
+  }
+  console.log("get_totp_code github", githubBody.code);
+
+  const searched = await mcp(token, {
+    jsonrpc: "2.0",
+    id: 10,
+    method: "tools/call",
+    params: { name: "search_totp", arguments: { query: "GitHub" } },
+  });
+  const searchedBody = searched.json.result.structuredContent;
+  if (searched.json.result.isError || searchedBody.alias !== "github" || searchedBody.code.length !== 6) {
+    fail(`search_totp ${JSON.stringify(searched.json.result)}`);
+  }
+  console.log("search_totp", searchedBody.alias, searchedBody.code);
+
+  const viaStdio = await stdioCall(token, {
+    jsonrpc: "2.0",
+    id: 11,
+    method: "tools/call",
+    params: { name: "get_totp_code", arguments: { alias: "github" } },
+  });
+  if (viaStdio.result?.structuredContent?.code?.length !== 6) {
+    fail(`mcp-stdio ${JSON.stringify(viaStdio)}`);
+  }
+  console.log("mcp-stdio", viaStdio.result.structuredContent.alias, viaStdio.result.structuredContent.code);
+
   const ambiguous = await mcp(token, {
     jsonrpc: "2.0",
     id: 5,
@@ -207,6 +266,63 @@ async function main() {
   }
   console.log("revoked token rejected");
   console.log("e2e ok", email);
+}
+
+function stdioCommand(token) {
+  if (process.env.VW_DOCKER === "1") {
+    const file = process.env.VW_COMPOSE_FILE;
+    return {
+      command: "docker",
+      args: [
+        "compose",
+        "-f",
+        file,
+        "exec",
+        "-T",
+        "-e",
+        "MCP_URL=http://127.0.0.1:8080/mcp",
+        "-e",
+        `MCP_ACCESS_TOKEN=${token}`,
+        "vaultwarden",
+        "/vaultwarden",
+        "mcp-stdio",
+      ],
+      env: process.env,
+    };
+  }
+  return {
+    command: process.env.VW_BIN,
+    args: ["mcp-stdio"],
+    env: { ...process.env, MCP_URL: `${base}/mcp`, MCP_ACCESS_TOKEN: token },
+  };
+}
+
+function stdioCall(token, payload) {
+  const spec = stdioCommand(token);
+  return new Promise((resolve, reject) => {
+    const child = spawn(spec.command, spec.args, { env: spec.env });
+    const json = JSON.stringify(payload);
+    const frame = `Content-Length: ${Buffer.byteLength(json)}\r\n\r\n${json}`;
+    let out = Buffer.alloc(0);
+    let err = "";
+    child.stdout.on("data", (chunk) => {
+      out = Buffer.concat([out, chunk]);
+    });
+    child.stderr.on("data", (chunk) => {
+      err += chunk.toString();
+    });
+    child.on("error", reject);
+    child.on("close", (code) => {
+      const text = out.toString("utf8");
+      const start = text.indexOf("{");
+      if (start < 0) {
+        reject(new Error(`mcp-stdio exited ${code} without JSON: ${err || text}`));
+        return;
+      }
+      resolve(JSON.parse(text.slice(start)));
+    });
+    child.stdin.end(frame);
+  });
 }
 
 main().catch((error) => fail(error.stack ?? String(error)));

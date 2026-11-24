@@ -19,6 +19,7 @@ if [[ "${VW_DOCKER:-}" == "1" ]]; then
   export HOST_PORT="${HOST_PORT:-8080}"
   docker compose -f "$ROOT/docker-compose.yml" up -d --build --wait
   export VW_BASE="${VW_BASE:-http://127.0.0.1:${HOST_PORT}}"
+  export VW_COMPOSE_FILE="$ROOT/docker-compose.yml"
 else
   BIN="${VW_BIN:-$ROOT/target/debug/vaultwarden}"
   DATA="${VW_DATA:-$ROOT/data/e2e-mcp}"
