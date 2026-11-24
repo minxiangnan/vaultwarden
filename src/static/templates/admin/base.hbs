@@ -64,6 +64,25 @@
 
     {{> (lookup this "page_content") }}
 
+    <div class="modal fade" id="vwConfirm" tabindex="-1" aria-labelledby="vwConfirmTitle" aria-hidden="true">
+        <div class="modal-dialog modal-dialog-centered">
+            <div class="modal-content vw-confirm">
+                <div class="modal-header">
+                    <h5 class="modal-title" id="vwConfirmTitle"></h5>
+                </div>
+                <div class="modal-body">
+                    <p id="vwConfirmBody" class="mb-0"></p>
+                    <label id="vwConfirmExpectLabel" class="form-label mt-3 d-none" for="vwConfirmInput"></label>
+                    <input id="vwConfirmInput" class="form-control d-none" type="text" autocomplete="off" spellcheck="false">
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" id="vwConfirmCancel" autofocus>取消</button>
+                    <button type="button" class="btn btn-danger" id="vwConfirmOk">确认</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <!-- This script needs to be at the bottom, else it will fail! -->
     <script src="{{urlpath}}/vw_static/bootstrap.bundle.js"></script>
 </body>

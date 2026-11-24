@@ -9,7 +9,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         pkg-config \
     && rm -rf /var/lib/apt/lists/*
 COPY . .
-ARG VW_VERSION=v-zh-authenticator-1.2.0
+ARG VW_VERSION=v-zh-authenticator-1.2.1
 ENV VW_VERSION=${VW_VERSION}
 RUN cargo build --locked --release --features sqlite
 

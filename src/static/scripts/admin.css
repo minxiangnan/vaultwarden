@@ -215,3 +215,31 @@ body {
     background: #f6f1ea;
     color: #3d3929;
 }
+
+.vw-confirm {
+    background: #fffdf8;
+    color: #3d3929;
+    border: 1px solid #e8e6dc;
+    box-shadow: 0 16px 40px rgba(61, 57, 41, 0.16);
+}
+
+.vw-confirm .modal-header,
+.vw-confirm .modal-footer {
+    border-color: #e8e6dc;
+}
+
+.vw-confirm .modal-title {
+    color: #3d3929;
+    font-size: 1.05rem;
+}
+
+#vwConfirm .modal-backdrop,
+.modal-backdrop {
+    --bs-backdrop-bg: #3d3929;
+    --bs-backdrop-opacity: 0.28;
+}
+
+#vwConfirmCancel:focus {
+    outline: 2px solid #c4532a;
+    outline-offset: 2px;
+}

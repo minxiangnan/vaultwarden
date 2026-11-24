@@ -589,7 +589,7 @@ make_config! {
         purge_incomplete_sso_auth: String, false,  def,   "0 20 0 * * *".to_owned();
     },
 
-    /// General settings
+    /// 常规设置
     settings {
         /// Domain URL |> This needs to be set to the URL used to access the server, including 'http[s]://'
         /// and port, if it's different than the default. Some server functions don't work correctly without this value
@@ -687,7 +687,7 @@ make_config! {
         client_suppress_onboarding:         bool, true,   def,    false;
     },
 
-    /// MCP access to opted-in TOTP codes |> Off unless set. Only entries the user explicitly opts in can be read, and only with that user's MCP access token.
+    /// 已放行验证码的 MCP 访问 |> 默认关闭。只有用户明确放行的条目能被读取，而且必须使用该用户的 MCP 令牌。
     mcp {
         /// Enable MCP |> Expose POST /mcp and the /api/mcp management routes.
         mcp_enabled:            bool,   true,   def,    false;
@@ -697,7 +697,7 @@ make_config! {
         mcp_ratelimit_burst:    u16,    true,   def,    30;
     },
 
-    /// Advanced settings
+    /// 高级设置
     advanced {
         /// Client IP header |> If not present, the remote IP is used.
         /// Set to the string "none" (without quotes), to disable any headers and just use the remote IP
@@ -851,7 +851,7 @@ make_config! {
         dns_prefer_ipv6: bool, true, def, false;
     },
 
-    /// OpenID Connect SSO settings
+    /// OpenID Connect 单点登录
     sso {
         /// Enabled
         sso_enabled:                    bool,   true,   def,    false;
@@ -889,7 +889,7 @@ make_config! {
         sso_debug_tokens:               bool,   true,   def,    false;
     },
 
-    /// Yubikey settings
+    /// YubiKey 设置
     yubico: _enable_yubico {
         /// Enabled
         _enable_yubico:         bool,   true,   def,     true;
@@ -901,7 +901,7 @@ make_config! {
         yubico_server:          String, true,   option;
     },
 
-    /// Global Duo settings (Note that users can override them)
+    /// 全局 Duo 设置（用户可以单独覆盖）
     duo: _enable_duo {
         /// Enabled
         _enable_duo:            bool,   true,   def,     true;
@@ -913,7 +913,7 @@ make_config! {
         duo_host:               String, true,   option;
     },
 
-    /// SMTP Email Settings
+    /// SMTP 邮件
     smtp: _enable_smtp {
         /// Enabled
         _enable_smtp:                  bool,   true,   def,     true;
@@ -957,7 +957,7 @@ make_config! {
         smtp_accept_invalid_hostnames: bool,   true,   def,     false;
     },
 
-    /// Email 2FA Settings
+    /// 邮件二次验证
     email_2fa: _enable_email_2fa {
         /// Enabled |> Disabling will prevent users from setting up new email 2FA and using existing email 2FA configured
         _enable_email_2fa:      bool,   true,   auto,    |c| c._enable_smtp && (c.smtp_host.is_some() || c.use_sendmail);

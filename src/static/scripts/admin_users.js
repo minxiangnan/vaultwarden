@@ -1,7 +1,7 @@
 "use strict";
-/* global DataTable, _post:readable, _delete:readable, BASE_URL:readable, reload:readable, jdenticon:readable */
+/* global DataTable, _post:readable, _delete:readable, BASE_URL:readable, reload:readable, jdenticon:readable, confirmDanger:readable */
 
-function deleteUser(event) {
+async function deleteUser(event) {
     event.preventDefault();
     event.stopPropagation();
     const id = event.target.parentNode.dataset.vwUserUuid;
@@ -10,60 +10,22 @@ function deleteUser(event) {
         alert("缺少必要参数。");
         return false;
     }
-    const input_email = prompt(`要删除用户「${email}」，请在下面输入该邮箱`);
-    if (input_email != null) {
-        if (input_email == email) {
-            _post(`${BASE_URL}/admin/users/${id}/delete`,
-                "用户已删除",
-                "删除用户失败"
-            );
-        } else {
-            alert("邮箱不一致，请重试。");
-        }
-    }
-}
-
-function deleteSSOUser(event) {
-    event.preventDefault();
-    event.stopPropagation();
-    const id = event.target.parentNode.dataset.vwUserUuid;
-    const email = event.target.parentNode.dataset.vwUserEmail;
-    if (!id || !email) {
-        alert("缺少必要参数。");
-        return false;
-    }
-    const input_email = prompt(`To delete user "${email}" SSO association, please type the email below`);
-    if (input_email != null) {
-        if (input_email == email) {
-            _delete(`${BASE_URL}/admin/users/${id}/sso`,
-                "User SSO association deleted correctly",
-                "Error deleting user SSO association"
-            );
-        } else {
-            alert("邮箱不一致，请重试。");
-        }
-    }
-}
-
-function remove2fa(event) {
-    event.preventDefault();
-    event.stopPropagation();
-    const id = event.target.parentNode.dataset.vwUserUuid;
-    const email = event.target.parentNode.dataset.vwUserEmail;
-    if (!id || !email) {
-        alert("缺少必要参数。");
-        return false;
-    }
-    const confirmed = confirm(`Are you sure you want to remove 2FA for "${email}"?`);
+    const confirmed = await confirmDanger({
+        title: `删除用户 ${email}`,
+        body: "删除后该账户及其数据无法恢复。请输入该用户的邮箱以确认。",
+        confirmLabel: "删除用户",
+        expect: email,
+        expectLabel: "输入邮箱"
+    });
     if (confirmed) {
-        _post(`${BASE_URL}/admin/users/${id}/remove-2fa`,
-            "2FA removed correctly",
-            "Error removing 2FA"
+        _post(`${BASE_URL}/admin/users/${id}/delete`,
+            "用户已删除",
+            "删除用户失败"
         );
     }
 }
 
-function revokeMcp(event) {
+async function deleteSSOUser(event) {
     event.preventDefault();
     event.stopPropagation();
     const id = event.target.parentNode.dataset.vwUserUuid;
@@ -72,7 +34,57 @@ function revokeMcp(event) {
         alert("缺少必要参数。");
         return false;
     }
-    const confirmed = confirm(`吊销「${email}」的 MCP 令牌？已放行的验证码会立刻停止读取，直到用户创建新令牌。`);
+    const confirmed = await confirmDanger({
+        title: `删除 SSO 关联 ${email}`,
+        body: "只删除单点登录关联，账户仍会保留。请输入该用户的邮箱以确认。",
+        confirmLabel: "删除关联",
+        expect: email,
+        expectLabel: "输入邮箱"
+    });
+    if (confirmed) {
+        _delete(`${BASE_URL}/admin/users/${id}/sso`,
+            "SSO 关联已删除",
+            "删除 SSO 关联失败"
+        );
+    }
+}
+
+async function remove2fa(event) {
+    event.preventDefault();
+    event.stopPropagation();
+    const id = event.target.parentNode.dataset.vwUserUuid;
+    const email = event.target.parentNode.dataset.vwUserEmail;
+    if (!id || !email) {
+        alert("缺少必要参数。");
+        return false;
+    }
+    const confirmed = await confirmDanger({
+        title: `移除二次验证 ${email}`,
+        body: "会移除该用户的全部二次验证。",
+        confirmLabel: "移除二次验证"
+    });
+    if (confirmed) {
+        _post(`${BASE_URL}/admin/users/${id}/remove-2fa`,
+            "二次验证已移除",
+            "移除二次验证失败"
+        );
+    }
+}
+
+async function revokeMcp(event) {
+    event.preventDefault();
+    event.stopPropagation();
+    const id = event.target.parentNode.dataset.vwUserUuid;
+    const email = event.target.parentNode.dataset.vwUserEmail;
+    if (!id || !email) {
+        alert("缺少必要参数。");
+        return false;
+    }
+    const confirmed = await confirmDanger({
+        title: `吊销 MCP 令牌 ${email}`,
+        body: "已放行的验证码会立刻停止读取，直到用户创建新令牌。",
+        confirmLabel: "吊销令牌"
+    });
     if (confirmed) {
         _post(`${BASE_URL}/admin/users/${id}/revoke-mcp`,
             "MCP 令牌已吊销",
@@ -81,7 +93,7 @@ function revokeMcp(event) {
     }
 }
 
-function deauthUser(event) {
+async function deauthUser(event) {
     event.preventDefault();
     event.stopPropagation();
     const id = event.target.parentNode.dataset.vwUserUuid;
@@ -90,16 +102,20 @@ function deauthUser(event) {
         alert("缺少必要参数。");
         return false;
     }
-    const confirmed = confirm(`Are you sure you want to deauthorize sessions for "${email}"?`);
+    const confirmed = await confirmDanger({
+        title: `注销会话 ${email}`,
+        body: "该用户当前的登录会话会立即失效。",
+        confirmLabel: "注销会话"
+    });
     if (confirmed) {
         _post(`${BASE_URL}/admin/users/${id}/deauth`,
-            "Sessions deauthorized correctly",
-            "Error deauthorizing sessions"
+            "会话已注销",
+            "注销会话失败"
         );
     }
 }
 
-function disableUser(event) {
+async function disableUser(event) {
     event.preventDefault();
     event.stopPropagation();
     const id = event.target.parentNode.dataset.vwUserUuid;
@@ -108,16 +124,20 @@ function disableUser(event) {
         alert("缺少必要参数。");
         return false;
     }
-    const confirmed = confirm(`Are you sure you want to disable user "${email}"? This will also deauthorize their sessions.`);
+    const confirmed = await confirmDanger({
+        title: `停用用户 ${email}`,
+        body: "停用后会同时注销该用户的会话。",
+        confirmLabel: "停用用户"
+    });
     if (confirmed) {
         _post(`${BASE_URL}/admin/users/${id}/disable`,
-            "User disabled successfully",
-            "Error disabling user"
+            "用户已停用",
+            "停用用户失败"
         );
     }
 }
 
-function enableUser(event) {
+async function enableUser(event) {
     event.preventDefault();
     event.stopPropagation();
     const id = event.target.parentNode.dataset.vwUserUuid;
@@ -126,11 +146,15 @@ function enableUser(event) {
         alert("缺少必要参数。");
         return false;
     }
-    const confirmed = confirm(`Are you sure you want to enable user "${email}"?`);
+    const confirmed = await confirmDanger({
+        title: `启用用户 ${email}`,
+        body: "启用后该用户可以重新登录。",
+        confirmLabel: "启用用户"
+    });
     if (confirmed) {
         _post(`${BASE_URL}/admin/users/${id}/enable`,
-            "User enabled successfully",
-            "Error enabling user"
+            "用户已启用",
+            "启用用户失败"
         );
     }
 }
@@ -159,7 +183,7 @@ function inviteUser(event) {
     );
 }
 
-function resendUserInvite(event) {
+async function resendUserInvite(event) {
     event.preventDefault();
     event.stopPropagation();
     const id = event.target.parentNode.dataset.vwUserUuid;
@@ -168,11 +192,15 @@ function resendUserInvite(event) {
         alert("缺少必要参数。");
         return false;
     }
-    const confirmed = confirm(`Are you sure you want to resend invitation for "${email}"?`);
+    const confirmed = await confirmDanger({
+        title: `重发邀请 ${email}`,
+        body: "将再次向该邮箱发送邀请。",
+        confirmLabel: "重发邀请"
+    });
     if (confirmed) {
         _post(`${BASE_URL}/admin/users/${id}/invite/resend`,
-            "Invite sent successfully",
-            "Error resend invite"
+            "邀请已发送",
+            "重发邀请失败"
         );
     }
 }
