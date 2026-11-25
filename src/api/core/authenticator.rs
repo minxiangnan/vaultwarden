@@ -146,8 +146,32 @@ async fn post_authenticator_entry(
     conn: DbConn,
     nt: Notify<'_>,
 ) -> JsonResult {
-    let mut entry = AuthenticatorEntry::new(headers.user.uuid, data.into_inner().into_fields()?);
+    let data = data.into_inner();
+    let client_id = data.id.clone();
+    let revision = data.revision_date.clone();
+    let fields = data.into_fields()?;
 
+    // A repeated POST with the same client id updates that row instead of inserting another.
+    if let Some(raw_id) = client_id.as_deref().filter(|value| !value.is_empty()) {
+        let id = parse_client_id(raw_id)?;
+        if let Some(mut existing) = AuthenticatorEntry::find_by_uuid_and_user(&id, &headers.user.uuid, &conn).await {
+            reject_stale(&existing, revision.as_deref())?;
+            existing.apply(fields);
+            existing.save(&conn).await?;
+            nt.send_authenticator_update(UpdateType::SyncAuthenticatorUpdate, &existing, &headers.device, &conn).await;
+            return Ok(Json(existing.to_json()));
+        }
+        if AuthenticatorEntry::find_by_uuid(&id, &conn).await.is_some() {
+            err!("Invalid authenticator entry", "Authenticator entry id is already used")
+        }
+        let mut entry = AuthenticatorEntry::new(headers.user.uuid, fields);
+        entry.uuid = id;
+        entry.save(&conn).await?;
+        nt.send_authenticator_update(UpdateType::SyncAuthenticatorCreate, &entry, &headers.device, &conn).await;
+        return Ok(Json(entry.to_json()));
+    }
+
+    let mut entry = AuthenticatorEntry::new(headers.user.uuid, fields);
     entry.save(&conn).await?;
     nt.send_authenticator_update(UpdateType::SyncAuthenticatorCreate, &entry, &headers.device, &conn).await;
 
@@ -166,7 +190,10 @@ async fn put_authenticator_entry(
         err!("Invalid authenticator entry", "Authenticator entry does not exist or belongs to another user")
     };
 
-    entry.apply(data.into_inner().into_fields()?);
+    let data = data.into_inner();
+    // The client sends the revisionDate it last read. A newer row means another device won.
+    reject_stale(&entry, data.revision_date.as_deref())?;
+    entry.apply(data.into_fields()?);
     entry.save(&conn).await?;
     nt.send_authenticator_update(UpdateType::SyncAuthenticatorUpdate, &entry, &headers.device, &conn).await;
 
@@ -195,6 +222,8 @@ async fn delete_authenticator_entry(
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct AuthenticatorEntryData {
+    /// Client-generated id. A second POST with the same id updates that row.
+    id: Option<String>,
     name: String,
     issuer: Option<String>,
     secret: String,
@@ -204,6 +233,33 @@ struct AuthenticatorEntryData {
     notes: Option<String>,
     favorite: Option<bool>,
     sort_order: Option<i32>,
+    /// Revision the client last read. Older than the stored row is a conflict.
+    revision_date: Option<String>,
+}
+
+/// 409 when [sent] is an older `revisionDate` than the row. Missing means a client that
+/// does not send one, and that write is still accepted.
+fn reject_stale(entry: &AuthenticatorEntry, sent: Option<&str>) -> EmptyResult {
+    let Some(sent) = sent.filter(|value| !value.is_empty()) else {
+        return Ok(());
+    };
+    let Some(parsed) = crate::util::parse_date(sent) else {
+        err_code!("Authenticator revisionDate is invalid.", rocket::http::Status::BadRequest.code)
+    };
+    if parsed.and_utc().timestamp_micros() < entry.revision_date.and_utc().timestamp_micros() {
+        err_code!(
+            "Authenticator entry was changed on another device. Sync and try again.",
+            rocket::http::Status::Conflict.code
+        )
+    }
+    Ok(())
+}
+
+fn parse_client_id(raw: &str) -> ApiResult<AuthenticatorEntryId> {
+    if uuid::Uuid::parse_str(raw).is_err() {
+        err!("Invalid authenticator entry", "Authenticator entry id must be a UUID")
+    }
+    Ok(AuthenticatorEntryId::from(raw.to_owned()))
 }
 
 impl AuthenticatorEntryData {
@@ -724,6 +780,86 @@ mod api_tests {
                 .unwrap();
             assert!(User::find_by_uuid(&owner_id, &conn).await.unwrap().updated_at.year() > 2000);
             assert!(get_authenticator_entry(first_id, headers(&owner_id, &conn).await, db.conn()).await.is_err());
+
+            let stale = put_authenticator_entry(
+                second_id.clone(),
+                Json(
+                    serde_json::from_value(json!({
+                        "name": "2.AAAA|AAAA|STAL",
+                        "secret": "2.AAAA|AAAA|STAL",
+                        "revisionDate": second["revisionDate"],
+                    }))
+                    .unwrap(),
+                ),
+                headers(&owner_id, &conn).await,
+                db.conn(),
+                notify,
+            )
+            .await;
+            assert!(stale.is_err());
+            assert_eq!(
+                AuthenticatorEntry::find_by_uuid_and_user(&second_id, &owner_id, &conn).await.unwrap().name,
+                "2.AAAA|AAAA|AAAG"
+            );
+
+            let current = updated["revisionDate"].as_str().unwrap();
+            let fresh = put_authenticator_entry(
+                second_id.clone(),
+                Json(
+                    serde_json::from_value(json!({
+                        "name": "2.AAAA|AAAA|FRSH",
+                        "secret": "2.AAAA|AAAA|FRSH",
+                        "revisionDate": current,
+                    }))
+                    .unwrap(),
+                ),
+                headers(&owner_id, &conn).await,
+                db.conn(),
+                notify,
+            )
+            .await
+            .unwrap()
+            .into_inner();
+            assert_eq!(fresh["name"], "2.AAAA|AAAA|FRSH");
+
+            let client_id = "33333333-3333-4333-8333-333333333333";
+            let created_with_id = post_authenticator_entry(
+                Json(
+                    serde_json::from_value(json!({
+                        "id": client_id,
+                        "name": "2.AAAA|AAAA|IDED",
+                        "secret": "2.AAAA|AAAA|IDED",
+                    }))
+                    .unwrap(),
+                ),
+                headers(&owner_id, &conn).await,
+                db.conn(),
+                notify,
+            )
+            .await
+            .unwrap()
+            .into_inner();
+            assert_eq!(created_with_id["id"], client_id);
+            let repeated = post_authenticator_entry(
+                Json(
+                    serde_json::from_value(json!({
+                        "id": client_id,
+                        "name": "2.AAAA|AAAA|IDE2",
+                        "secret": "2.AAAA|AAAA|IDE2",
+                        "revisionDate": created_with_id["revisionDate"],
+                    }))
+                    .unwrap(),
+                ),
+                headers(&owner_id, &conn).await,
+                db.conn(),
+                notify,
+            )
+            .await
+            .unwrap()
+            .into_inner();
+            assert_eq!(repeated["id"], client_id);
+            assert_eq!(repeated["name"], "2.AAAA|AAAA|IDE2");
+            assert_eq!(AuthenticatorEntry::find_by_user(&owner_id, &conn).await.unwrap().len(), 2);
 
             User::find_by_uuid(&owner_id, &conn).await.unwrap().delete(&conn).await.unwrap();
             assert_eq!(AuthenticatorEntry::find_by_user(&owner_id, &conn).await.unwrap().len(), 0);

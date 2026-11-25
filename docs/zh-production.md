@@ -4,10 +4,10 @@
 
 发布镜像：
 
-- `ghcr.io/minxiangnan/vaultwarden:v-zh-authenticator-1.2.2`
+- `ghcr.io/minxiangnan/vaultwarden:v-zh-authenticator-1.2.3`
 - `ghcr.io/minxiangnan/vaultwarden:zh-authenticator`（浮动标签，指向当前发布）
 
-两个标签都是 amd64 和 arm64。GitHub Actions 只有在标签 `v-zh-authenticator-1.2.2` 被推送到仓库、并且工作流跑完之后才会把镜像推到 GHCR。发布页上的标签本身不会自动触发这次构建。
+两个标签都是 amd64 和 arm64。GitHub Actions 只有在标签 `v-zh-authenticator-1.2.3` 被推送到仓库、并且工作流跑完之后才会把镜像推到 GHCR。发布页上的标签本身不会自动触发这次构建。
 
 ## 1. 准备
 
@@ -29,7 +29,7 @@ sudo usermod -aG docker "$USER"
 ```bash
 git clone https://github.com/minxiangnan/vaultwarden.git
 cd vaultwarden
-git checkout v-zh-authenticator-1.2.2
+git checkout v-zh-authenticator-1.2.3
 cp .env.example .env
 ```
 
@@ -71,7 +71,7 @@ docker compose -f docker-compose.prod.yml up -d
 docker compose -f docker-compose.prod.yml ps
 ```
 
-Caddy 监听 80 和 443，自动申请证书，并把 `/notifications/hub` 以 WebSocket 转发给 Vaultwarden。Vaultwarden 只在内部网络的 8080 上，不映射到宿主机。
+Caddy 监听 80 和 443，自动申请证书，并把 `/notifications/hub` 以 WebSocket 转发给 Vaultwarden。`ENABLE_WEBSOCKET` 在 compose 里是 `true`。Vaultwarden 只在内部网络的 8080 上，不映射到宿主机。验证器的创建、修改、删除，以及别名的写入和取消，都会从这条通道推给已经连接的安卓和扩展。客户端带上自己读到的 `revisionDate` 再保存时，如果这行已经被别的设备写过，服务器返回 409，不会覆盖。
 
 数据在命名卷 `vw-data`。容器重启策略是 `unless-stopped`。健康检查请求 `/alive`。Docker 把 json 日志限制在每个容器 5 个 10MB 文件。服务日志级别是 `info`。不要在公网机器上改成 `debug` 或打开 `EXTENDED_LOGGING`。
 
@@ -148,7 +148,7 @@ Claude Desktop 用 stdio。令牌只放在客户端环境里：
   "mcpServers": {
     "vaultwarden": {
       "command": "docker",
-      "args": ["run", "--rm", "-i", "ghcr.io/minxiangnan/vaultwarden:v-zh-authenticator-1.2.2", "mcp-stdio"],
+      "args": ["run", "--rm", "-i", "ghcr.io/minxiangnan/vaultwarden:v-zh-authenticator-1.2.3", "mcp-stdio"],
       "env": {
         "MCP_URL": "https://vault.example.com/mcp",
         "MCP_ACCESS_TOKEN": "vw_mcp_把令牌贴在这里"
@@ -186,12 +186,12 @@ Postgres 或 MySQL 不要用这个脚本。分别用 `pg_dump` 和 `mysqldump`�
 ```bash
 ./scripts/vw-backup.sh
 git fetch --tags
-git checkout v-zh-authenticator-1.2.2
+git checkout v-zh-authenticator-1.2.3
 docker compose -f docker-compose.prod.yml pull
 docker compose -f docker-compose.prod.yml up -d
 ```
 
-浮动标签 `zh-authenticator` 会跟着新发布变。生产环境把 `.env` 里的 `VW_IMAGE_TAG` 固定成 `v-zh-authenticator-1.2.2`，升级时再改。
+浮动标签 `zh-authenticator` 会跟着新发布变。生产环境把 `.env` 里的 `VW_IMAGE_TAG` 固定成 `v-zh-authenticator-1.2.3`，升级时再改。
 
 ## 11. 可选的 Postgres 或 MySQL
 
