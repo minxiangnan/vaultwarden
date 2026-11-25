@@ -1134,10 +1134,10 @@ async fn register_verification_email(
 
     let data = data.into_inner();
 
-    // the registration can only continue if signup is allowed or there exists an invitation
-    if !(CONFIG.is_signup_allowed(&data.email)
-        || (!CONFIG.mail_enabled() && Invitation::find_by_mail(&data.email, &conn).await.is_some()))
-    {
+    // Public signups can be closed. An admin invitation still lets that one address continue,
+    // including when SMTP is on, so the extension and Android app can create the account.
+    let invited = Invitation::find_by_mail(&data.email, &conn).await.is_some();
+    if !(CONFIG.is_signup_allowed(&data.email) || invited) {
         err!("Registration not allowed or user already exists")
     }
 

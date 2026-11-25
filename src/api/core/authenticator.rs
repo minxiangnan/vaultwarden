@@ -185,6 +185,8 @@ async fn delete_authenticator_entry(
     };
 
     entry.delete(&conn).await?;
+    // The opted-in copy is a separate row. Drop it with the entry so a deleted code cannot still be read.
+    crate::mcp::delete_source(&headers.user.uuid, "authenticator", &entry.uuid.to_string(), &conn).await?;
     nt.send_authenticator_update(UpdateType::SyncAuthenticatorDelete, &entry, &headers.device, &conn).await;
 
     Ok(())

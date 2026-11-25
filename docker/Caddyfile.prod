@@ -1,0 +1,18 @@
+# Production reverse proxy. DOMAIN_HOST is the hostname only, for example vault.example.com.
+# Caddy obtains the certificate and upgrades WebSocket connections.
+{$DOMAIN_HOST} {
+	encode gzip
+
+	handle /notifications/hub* {
+		reverse_proxy vaultwarden:8080 {
+			header_up X-Real-IP {remote_host}
+			flush_interval -1
+		}
+	}
+
+	handle {
+		reverse_proxy vaultwarden:8080 {
+			header_up X-Real-IP {remote_host}
+		}
+	}
+}

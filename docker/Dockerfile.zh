@@ -1,0 +1,49 @@
+# syntax=docker/dockerfile:1
+# Small production image for this fork: SQLite only, no web-vault, process runs as uid 1000.
+
+FROM docker.io/library/rust:1.99.1-slim-trixie AS build
+WORKDIR /src
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        git \
+        libmariadb-dev \
+        libpq-dev \
+        libssl-dev \
+        pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+COPY . .
+ARG VW_VERSION=v-zh-authenticator-1.2.2
+ARG VW_FEATURES=sqlite
+ENV VW_VERSION=${VW_VERSION}
+# Default image is SQLite. A Postgres or MySQL build passes
+# --build-arg VW_FEATURES=sqlite,postgresql or sqlite,mysql.
+RUN cargo build --locked --release --features "${VW_FEATURES}"
+
+FROM docker.io/library/debian:trixie-slim
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        libmariadb3 \
+        libpq5 \
+        openssl \
+        sqlite3 \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --system --gid 1000 vaultwarden \
+    && useradd --system --uid 1000 --gid 1000 --home-dir /data --shell /usr/sbin/nologin vaultwarden \
+    && mkdir -p /data \
+    && chown vaultwarden:vaultwarden /data
+
+COPY --from=build /src/target/release/vaultwarden /vaultwarden
+COPY docker/healthcheck.sh /healthcheck.sh
+COPY docker/entrypoint-zh.sh /entrypoint.sh
+RUN chmod 755 /vaultwarden /healthcheck.sh /entrypoint.sh
+
+ENV ROCKET_PROFILE=release \
+    ROCKET_ADDRESS=0.0.0.0 \
+    ROCKET_PORT=8080 \
+    DATA_FOLDER=/data \
+    WEB_VAULT_ENABLED=false
+
+EXPOSE 8080
+VOLUME /data
+HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=5 CMD ["/healthcheck.sh"]
+ENTRYPOINT ["/entrypoint.sh"]

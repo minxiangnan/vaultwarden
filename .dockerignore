@@ -5,6 +5,7 @@
 !.git
 !docker/healthcheck.sh
 !docker/start.sh
+!docker/entrypoint-zh.sh
 !macros
 !migrations
 !src

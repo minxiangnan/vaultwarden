@@ -589,7 +589,7 @@ make_config! {
         purge_incomplete_sso_auth: String, false,  def,   "0 20 0 * * *".to_owned();
     },
 
-    /// General settings
+    /// 常规设置
     settings {
         /// Domain URL |> This needs to be set to the URL used to access the server, including 'http[s]://'
         /// and port, if it's different than the default. Some server functions don't work correctly without this value
@@ -687,7 +687,17 @@ make_config! {
         client_suppress_onboarding:         bool, true,   def,    false;
     },
 
-    /// Advanced settings
+    /// 已放行验证码的 MCP 访问 |> 默认关闭。只有用户明确放行的条目能被读取，而且必须使用该用户的 MCP 令牌。
+    mcp {
+        /// Enable MCP |> Expose POST /mcp and the /api/mcp management routes.
+        mcp_enabled:            bool,   true,   def,    false;
+        /// MCP replenish period (seconds) |> After the burst is used, one additional code read is allowed per this many seconds.
+        mcp_ratelimit_seconds:  u16,    true,   def,    2;
+        /// MCP burst |> How many code reads a token may make before the replenish period applies.
+        mcp_ratelimit_burst:    u16,    true,   def,    30;
+    },
+
+    /// 高级设置
     advanced {
         /// Client IP header |> If not present, the remote IP is used.
         /// Set to the string "none" (without quotes), to disable any headers and just use the remote IP
@@ -841,7 +851,7 @@ make_config! {
         dns_prefer_ipv6: bool, true, def, false;
     },
 
-    /// OpenID Connect SSO settings
+    /// OpenID Connect 单点登录
     sso {
         /// Enabled
         sso_enabled:                    bool,   true,   def,    false;
@@ -879,7 +889,7 @@ make_config! {
         sso_debug_tokens:               bool,   true,   def,    false;
     },
 
-    /// Yubikey settings
+    /// YubiKey 设置
     yubico: _enable_yubico {
         /// Enabled
         _enable_yubico:         bool,   true,   def,     true;
@@ -891,7 +901,7 @@ make_config! {
         yubico_server:          String, true,   option;
     },
 
-    /// Global Duo settings (Note that users can override them)
+    /// 全局 Duo 设置（用户可以单独覆盖）
     duo: _enable_duo {
         /// Enabled
         _enable_duo:            bool,   true,   def,     true;
@@ -903,7 +913,7 @@ make_config! {
         duo_host:               String, true,   option;
     },
 
-    /// SMTP Email Settings
+    /// SMTP 邮件
     smtp: _enable_smtp {
         /// Enabled
         _enable_smtp:                  bool,   true,   def,     true;
@@ -947,7 +957,7 @@ make_config! {
         smtp_accept_invalid_hostnames: bool,   true,   def,     false;
     },
 
-    /// Email 2FA Settings
+    /// 邮件二次验证
     email_2fa: _enable_email_2fa {
         /// Enabled |> Disabling will prevent users from setting up new email 2FA and using existing email 2FA configured
         _enable_email_2fa:      bool,   true,   auto,    |c| c._enable_smtp && (c.smtp_host.is_some() || c.use_sendmail);
@@ -1328,6 +1338,22 @@ fn validate_config(cfg: &ConfigItems, on_update: bool) -> Result<(), Error> {
 
     if !cfg.purge_incomplete_sso_auth.is_empty() && cfg.purge_incomplete_sso_auth.parse::<Schedule>().is_err() {
         err!("`PURGE_INCOMPLETE_SSO_AUTH` is not a valid cron expression")
+    }
+
+    if cfg.mcp_ratelimit_seconds < 1 {
+        err!("`MCP_RATELIMIT_SECONDS` must be at least 1 second");
+    }
+    if cfg.mcp_ratelimit_burst < 1 {
+        err!("`MCP_RATELIMIT_BURST` must be at least 1");
+    }
+    if cfg.mcp_enabled {
+        let domain = cfg.domain.trim().to_ascii_lowercase();
+        let local = domain.contains("://localhost") || domain.contains("://127.0.0.1") || domain.contains("://[::1]");
+        if domain.starts_with("http://") && !local {
+            println!(
+                "[WARNING] MCP_ENABLED is set and DOMAIN is plain HTTP. The MCP access token is a bearer secret; put the server behind HTTPS."
+            );
+        }
     }
 
     if cfg.login_ratelimit_seconds < 1 {

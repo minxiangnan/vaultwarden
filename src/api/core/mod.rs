@@ -6,6 +6,7 @@ mod ciphers;
 mod emergency_access;
 mod events;
 mod folders;
+mod mcp_access;
 mod organizations;
 mod public;
 mod sends;
@@ -47,6 +48,7 @@ pub fn routes() -> Vec<Route> {
     routes.append(&mut events::routes());
     routes.append(&mut folders::routes());
     routes.append(&mut authenticator::routes());
+    routes.append(&mut mcp_access::routes());
     routes.append(&mut organizations::routes());
     routes.append(&mut two_factor::routes());
     routes.append(&mut sends::routes());

@@ -1,5 +1,5 @@
 "use strict";
-/* exported BASE_URL, _post, _delete */
+/* exported BASE_URL, _post, _delete, confirmDanger */
 
 function getBaseUrl() {
     // If the base URL is `https://vaultwarden.example.com/base/path/admin/`,
@@ -76,21 +76,10 @@ function _delete(url, successMsg, errMsg, body, reload_page = true) {
 const getStoredTheme = () => localStorage.getItem("theme");
 const setStoredTheme = theme => localStorage.setItem("theme", theme);
 
-const getPreferredTheme = () => {
-    const storedTheme = getStoredTheme();
-    if (storedTheme) {
-        return storedTheme;
-    }
+const getPreferredTheme = () => "light";
 
-    return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
-};
-
-const setTheme = theme => {
-    if (theme === "auto" && window.matchMedia("(prefers-color-scheme: dark)").matches) {
-        document.documentElement.setAttribute("data-bs-theme", "dark");
-    } else {
-        document.documentElement.setAttribute("data-bs-theme", theme);
-    }
+const setTheme = _theme => {
+    document.documentElement.setAttribute("data-bs-theme", "light");
 };
 
 setTheme(getPreferredTheme());
@@ -131,6 +120,70 @@ const showActiveTheme = (theme, focus = false) => {
         themeSwitcher.focus();
     }
 };
+
+// One confirmation dialog for every destructive admin action.
+// Cancel stays focused until the operator chooses the danger button.
+function confirmDanger(options) {
+    const modalEl = document.getElementById("vwConfirm");
+    const title = document.getElementById("vwConfirmTitle");
+    const body = document.getElementById("vwConfirmBody");
+    const label = document.getElementById("vwConfirmExpectLabel");
+    const input = document.getElementById("vwConfirmInput");
+    const ok = document.getElementById("vwConfirmOk");
+    const cancel = document.getElementById("vwConfirmCancel");
+    const expect = options.expect;
+    const needsInput = typeof expect === "string";
+
+    title.textContent = options.title;
+    body.textContent = options.body || "";
+    ok.textContent = options.confirmLabel || "确认";
+    input.value = "";
+    label.textContent = options.expectLabel || "";
+    label.classList.toggle("d-none", !needsInput);
+    input.classList.toggle("d-none", !needsInput);
+    ok.disabled = needsInput;
+
+    const modal = bootstrap.Modal.getOrCreateInstance(modalEl, { backdrop: "static" });
+    return new Promise((resolve) => {
+        let settled = false;
+        const finish = (value) => {
+            if (settled) {
+                return;
+            }
+            settled = true;
+            modal.hide();
+            resolve(value);
+        };
+        const onInput = () => {
+            ok.disabled = input.value !== expect;
+        };
+        const onOk = () => {
+            if (needsInput && input.value !== expect) {
+                return;
+            }
+            finish(true);
+        };
+        const onCancel = () => finish(false);
+        const onHidden = () => {
+            ok.removeEventListener("click", onOk);
+            cancel.removeEventListener("click", onCancel);
+            input.removeEventListener("input", onInput);
+            modalEl.removeEventListener("hidden.bs.modal", onHidden);
+            if (!settled) {
+                settled = true;
+                resolve(false);
+            }
+        };
+        ok.addEventListener("click", onOk);
+        cancel.addEventListener("click", onCancel);
+        if (needsInput) {
+            input.addEventListener("input", onInput);
+        }
+        modalEl.addEventListener("hidden.bs.modal", onHidden);
+        modalEl.addEventListener("shown.bs.modal", () => cancel.focus(), { once: true });
+        modal.show();
+    });
+}
 
 window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => {
     const storedTheme = getStoredTheme();

@@ -10,6 +10,7 @@ mod event;
 mod favorite;
 mod folder;
 mod group;
+mod mcp;
 mod org_policy;
 mod organization;
 mod send;
@@ -34,6 +35,7 @@ pub use self::event::{Event, EventType};
 pub use self::favorite::Favorite;
 pub use self::folder::{Folder, FolderCipher, FolderId};
 pub use self::group::{CollectionGroup, Group, GroupId, GroupUser};
+pub use self::mcp::{AuditNote, McpAudit, McpEntry, McpSealed, McpToken};
 pub use self::org_policy::{FillAssistPolicyData, OrgPolicy, OrgPolicyId, OrgPolicyType};
 #[cfg(all(test, sqlite))]
 pub(crate) use self::organization::test_flag;

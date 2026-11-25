@@ -1,0 +1,41 @@
+# Optional MySQL override. The published GHCR image is SQLite only.
+# Rebuild with the mysql feature, then start both files:
+#
+#   VW_FEATURES=sqlite,mysql docker compose \
+#     -f docker-compose.prod.yml -f docker-compose.mysql.yml up -d --build
+#
+# Set MYSQL_PASSWORD in .env. Back up with mysqldump, not scripts/vw-backup.sh.
+
+services:
+  vaultwarden:
+    environment:
+      DATABASE_URL: mysql://vaultwarden:${MYSQL_PASSWORD}@mysql/vaultwarden
+    depends_on:
+      mysql:
+        condition: service_healthy
+
+  mysql:
+    image: mysql:8.4
+    restart: unless-stopped
+    environment:
+      MYSQL_USER: vaultwarden
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?在 .env 设置 MYSQL_PASSWORD}
+      MYSQL_DATABASE: vaultwarden
+      MYSQL_RANDOM_ROOT_PASSWORD: "yes"
+    volumes:
+      - mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uvaultwarden -p\"$$MYSQL_PASSWORD\""]
+      interval: 10s
+      timeout: 5s
+      retries: 8
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    networks:
+      - internal
+
+volumes:
+  mysql-data:

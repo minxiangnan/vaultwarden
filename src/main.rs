@@ -57,6 +57,7 @@ mod crypto;
 mod db;
 mod http_client;
 mod mail;
+mod mcp;
 mod ratelimit;
 mod sso;
 mod sso_client;
@@ -73,6 +74,10 @@ pub use util::is_running_in_container;
 #[rocket::main]
 async fn main() -> Result<(), Error> {
     install_rustls_crypto_provider();
+    if std::env::args().nth(1).as_deref() == Some("mcp-stdio") {
+        mcp::stdio::run().await;
+        exit(0);
+    }
     parse_args();
     launch_info();
 
@@ -109,6 +114,7 @@ FLAGS:
 COMMAND:
     hash [--preset {bitwarden|owasp}]  Generate an Argon2id PHC ADMIN_TOKEN
     backup                             Create a backup of the SQLite database
+    mcp-stdio                          Proxy MCP stdio to MCP_URL using MCP_ACCESS_TOKEN
                                        You can also send the USR1 signal to trigger a backup
 
 PRESETS:                  m=         t=          p=
@@ -597,6 +603,7 @@ async fn launch_rocket(pool: db::DbPool, extra_debug: bool) -> Result<(), Error>
         .mount([basepath, "/identity"].concat(), api::identity_routes())
         .mount([basepath, "/icons"].concat(), api::icons_routes())
         .mount([basepath, "/notifications"].concat(), api::notifications_routes())
+        .mount([basepath, "/mcp"].concat(), api::mcp_routes())
         .register([basepath, "/"].concat(), api::web_catchers())
         .register([basepath, "/api"].concat(), api::core_catchers())
         .register([basepath, "/admin"].concat(), api::admin_catchers())

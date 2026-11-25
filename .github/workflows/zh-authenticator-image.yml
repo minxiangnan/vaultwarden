@@ -1,0 +1,81 @@
+name: zh-authenticator image
+
+on:
+  push:
+    tags:
+      - "v-zh-authenticator-*"
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  image:
+    name: Build ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push ${{ matrix.arch }}
+        env:
+          ARCH: ${{ matrix.arch }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          docker buildx build \
+            --file docker/Dockerfile.zh \
+            --platform "linux/${ARCH}" \
+            --build-arg VW_VERSION="${REF_NAME}" \
+            --tag "ghcr.io/minxiangnan/vaultwarden:zh-authenticator-${ARCH}" \
+            --push \
+            .
+
+  manifest:
+    name: Publish multi-arch manifest
+    needs: image
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Combine amd64 and arm64
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          tags=(-t ghcr.io/minxiangnan/vaultwarden:zh-authenticator)
+          if [ "$REF_TYPE" = "tag" ]; then
+            tags+=(-t "ghcr.io/minxiangnan/vaultwarden:${REF_NAME}")
+          fi
+          docker buildx imagetools create "${tags[@]}" \
+            ghcr.io/minxiangnan/vaultwarden:zh-authenticator-amd64 \
+            ghcr.io/minxiangnan/vaultwarden:zh-authenticator-arm64
+          {
+            echo "Published image tags:"
+            echo "- ghcr.io/minxiangnan/vaultwarden:zh-authenticator"
+            if [ "$REF_TYPE" = "tag" ]; then
+              echo "- ghcr.io/minxiangnan/vaultwarden:${REF_NAME}"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

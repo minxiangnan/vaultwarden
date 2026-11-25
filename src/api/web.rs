@@ -51,11 +51,8 @@ pub fn routes() -> Vec<Route> {
 }
 
 pub fn catchers() -> Vec<Catcher> {
-    if CONFIG.web_vault_enabled() {
-        catchers![not_found]
-    } else {
-        catchers![]
-    }
+    // Always show the cream 404, including when the web vault is not bundled.
+    catchers![not_found]
 }
 
 #[catch(404)]

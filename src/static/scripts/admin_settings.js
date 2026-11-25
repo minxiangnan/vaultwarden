@@ -1,5 +1,5 @@
 "use strict";
-/* global _post:readable, BASE_URL:readable */
+/* global _post:readable, BASE_URL:readable, confirmDanger:readable */
 
 function smtpTest(event) {
     event.preventDefault();
@@ -52,20 +52,21 @@ function saveConfig(event) {
     event.preventDefault();
 }
 
-function deleteConf(event) {
+async function deleteConf(event) {
     event.preventDefault();
     event.stopPropagation();
-    const input = prompt(
-        "This will remove all user configurations, and restore the defaults and the " +
-        "values set by the environment. This operation could be dangerous. Type 'DELETE' to proceed:"
-    );
-    if (input === "DELETE") {
+    const confirmed = await confirmDanger({
+        title: "恢复默认配置",
+        body: "会清除在此页面保存的配置，改回默认值和环境变量。请输入「删除」以确认。",
+        confirmLabel: "恢复默认",
+        expect: "删除",
+        expectLabel: "输入「删除」"
+    });
+    if (confirmed) {
         _post(`${BASE_URL}/admin/config/delete`,
-            "Config deleted correctly",
-            "Error deleting config"
+            "配置已恢复默认",
+            "恢复默认配置失败"
         );
-    } else {
-        alert("Wrong input, please try again");
     }
 }
 
