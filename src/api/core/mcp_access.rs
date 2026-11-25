@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 
 use crate::{
     CONFIG,
-    api::{EmptyResult, JsonResult},
+    api::{EmptyResult, JsonResult, Notify, UpdateType},
     auth::Headers,
     db::{
         DbConn,
@@ -119,7 +119,14 @@ struct EntryBody {
 }
 
 #[put("/mcp/entries/<source>/<source_id>", data = "<body>")]
-async fn put_entry(source: &str, source_id: &str, body: Json<EntryBody>, headers: Headers, conn: DbConn) -> JsonResult {
+async fn put_entry(
+    source: &str,
+    source_id: &str,
+    body: Json<EntryBody>,
+    headers: Headers,
+    conn: DbConn,
+    nt: Notify<'_>,
+) -> JsonResult {
     require_enabled()?;
     if McpToken::find_active_by_user(&headers.user.uuid, &conn).await.is_none() {
         err!("请先创建 MCP 访问令牌");
@@ -140,13 +147,27 @@ async fn put_entry(source: &str, source_id: &str, body: Json<EntryBody>, headers
         steam: body.steam.unwrap_or(false),
     };
     let entry = mcp::store_entry(&headers.user.uuid, input, &conn).await?;
+    notify_authenticator(&headers, source, source_id, &conn, &nt).await;
     Ok(Json(entry.to_summary_json()))
 }
 
 #[delete("/mcp/entries/<source>/<source_id>")]
-async fn delete_entry(source: &str, source_id: &str, headers: Headers, conn: DbConn) -> EmptyResult {
+async fn delete_entry(source: &str, source_id: &str, headers: Headers, conn: DbConn, nt: Notify<'_>) -> EmptyResult {
     require_enabled()?;
-    mcp::delete_source(&headers.user.uuid, source, source_id, &conn).await
+    mcp::delete_source(&headers.user.uuid, source, source_id, &conn).await?;
+    notify_authenticator(&headers, source, source_id, &conn, &nt).await;
+    Ok(())
+}
+
+/// Alias changes are not a new authenticator revision. Tell other devices to reload anyway.
+async fn notify_authenticator(headers: &Headers, source: &str, source_id: &str, conn: &DbConn, nt: &Notify<'_>) {
+    if source != "authenticator" {
+        return;
+    }
+    let id = AuthenticatorEntryId::from(source_id.to_owned());
+    if let Some(entry) = AuthenticatorEntry::find_by_uuid_and_user(&id, &headers.user.uuid, conn).await {
+        nt.send_authenticator_update(UpdateType::SyncAuthenticatorUpdate, &entry, &headers.device, conn).await;
+    }
 }
 
 #[get("/mcp/audit")]

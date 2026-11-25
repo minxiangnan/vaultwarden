@@ -3,6 +3,8 @@
 {$DOMAIN_HOST} {
 	encode gzip
 
+	# Caddy upgrades this route when the client sends Connection: Upgrade.
+	# flush_interval -1 keeps hub frames from sitting in a buffer.
 	handle /notifications/hub* {
 		reverse_proxy vaultwarden:8080 {
 			header_up X-Real-IP {remote_host}

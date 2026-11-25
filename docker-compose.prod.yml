@@ -17,7 +17,7 @@ services:
       context: .
       dockerfile: docker/Dockerfile.zh
       args:
-        VW_VERSION: ${VW_VERSION:-v-zh-authenticator-1.2.2}
+        VW_VERSION: ${VW_VERSION:-v-zh-authenticator-1.2.3}
         VW_FEATURES: ${VW_FEATURES:-sqlite}
     restart: unless-stopped
     env_file:
