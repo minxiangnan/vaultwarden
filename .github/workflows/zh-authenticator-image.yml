@@ -2,6 +2,8 @@ name: zh-authenticator image
 
 on:
   push:
+    branches:
+      - main
     tags:
       - "v-zh-authenticator-*"
   workflow_dispatch:
