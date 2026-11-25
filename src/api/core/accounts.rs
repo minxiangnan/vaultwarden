@@ -21,10 +21,10 @@ use crate::{
     db::{
         DbConn, DbPool,
         models::{
-            AuthRequest, AuthRequestId, Cipher, CipherId, Device, DeviceId, DeviceType, DeviceWithAuthRequest,
-            EmergencyAccess, EmergencyAccessId, EventType, Folder, FolderId, Invitation, KeyId, Membership,
-            MembershipId, OrgPolicy, OrgPolicyType, Organization, OrganizationId, Send, SendId, SignatureAlgorithm,
-            User, UserId, UserKdfType, UserSignatureKeyPair,
+            AuthRequest, AuthRequestId, AuthenticatorEntry, Cipher, CipherId, Device, DeviceId, DeviceType,
+            DeviceWithAuthRequest, EmergencyAccess, EmergencyAccessId, EventType, Folder, FolderId, Invitation, KeyId,
+            Membership, MembershipId, OrgPolicy, OrgPolicyType, Organization, OrganizationId, Send, SendId,
+            SignatureAlgorithm, User, UserId, UserKdfType, UserSignatureKeyPair,
         },
     },
     mail,
@@ -32,6 +32,7 @@ use crate::{
 };
 
 use super::{
+    authenticator::{AuthenticatorRotationData, reencrypted_content},
     ciphers::{CipherData, rotate_cipher_data, validate_rotated_cipher},
     sends::SendData,
 };
@@ -1259,6 +1260,10 @@ struct RotateAccountData {
     ciphers: Vec<CipherData>,
     folders: Vec<UpdateFolderData>,
     sends: Vec<SendData>,
+    /// Absent on official clients. Required once this user has authenticator entries, so a rotation
+    /// cannot leave them encrypted with the key that was just replaced.
+    #[serde(default)]
+    authenticator_entries: Option<Vec<AuthenticatorRotationData>>,
 }
 
 /// Body of `rotate-user-keys`, which rotates the keys without touching the master password.
@@ -1422,6 +1427,67 @@ fn validate_rotation_data(
         err!("All existing sends must be included in the rotation")
     }
 
+    Ok(())
+}
+
+/// Whether a rotation may omit `authenticatorEntries`.
+///
+/// `rotate-user-account-keys` changes the master key, so omission would make existing entries
+/// permanently unreadable. `rotate-user-keys` keeps the master key; the first such rotation may
+/// omit the entries and stash the old wrapped user key. A second rotation has to wait until
+/// `PUT /api/authenticator/rotate` consumes that stash.
+fn authenticator_omission_allowed(
+    provided: Option<&[AuthenticatorRotationData]>,
+    existing: &[AuthenticatorEntry],
+    pending_legacy_key: bool,
+    password_changes: bool,
+) -> EmptyResult {
+    if provided.is_some() {
+        return Ok(());
+    }
+    if password_changes && (!existing.is_empty() || pending_legacy_key) {
+        err!(
+            "Existing authenticator entries must be re-encrypted during key rotation. Include every entry in authenticatorEntries."
+        )
+    }
+    if pending_legacy_key {
+        err!("Authenticator entries must be re-encrypted before another key rotation.")
+    }
+    Ok(())
+}
+
+/// A provided set must be exactly this user's entries, with re-encrypted ciphertext.
+pub(crate) async fn validate_authenticator_rotation(
+    provided: &[AuthenticatorRotationData],
+    existing: &[AuthenticatorEntry],
+    user_id: &UserId,
+    conn: &DbConn,
+) -> EmptyResult {
+    let mut provided_ids = HashSet::new();
+    for item in provided {
+        if !provided_ids.insert(&item.id) {
+            err!("Authenticator entries in the rotation must be unique")
+        }
+        if existing.iter().any(|entry| entry.uuid == item.id) {
+            continue;
+        }
+        match AuthenticatorEntry::find_by_uuid(&item.id, conn).await {
+            Some(entry) if &entry.user_uuid == user_id => {}
+            _ => err!("Authenticator entry does not exist or belongs to another user"),
+        }
+    }
+
+    let existing_ids = existing.iter().map(|entry| &entry.uuid).collect::<HashSet<_>>();
+    if provided_ids != existing_ids {
+        err!("All existing authenticator entries must be included in the rotation")
+    }
+
+    for item in provided {
+        let Some(existing_entry) = existing.iter().find(|entry| entry.uuid == item.id) else {
+            err!("All existing authenticator entries must be included in the rotation")
+        };
+        reencrypted_content(existing_entry, item)?;
+    }
     Ok(())
 }
 
@@ -1643,6 +1709,7 @@ async fn rotate_account(data: RotateData, headers: Headers, conn: DbConn, nt: No
     // We only rotate the reset password key if it is set.
     existing_memberships.retain(|m| m.reset_password_key.is_some());
     let mut existing_sends = Send::find_by_user(user_id, &conn).await;
+    let mut existing_authenticators = AuthenticatorEntry::find_by_user(user_id, &conn).await?;
 
     validate_rotation_data(
         &data,
@@ -1652,6 +1719,15 @@ async fn rotate_account(data: RotateData, headers: Headers, conn: DbConn, nt: No
         &existing_memberships,
         &existing_sends,
     )?;
+    authenticator_omission_allowed(
+        data.account_data.authenticator_entries.as_deref(),
+        &existing_authenticators,
+        headers.user.authenticator_legacy_key.is_some(),
+        data.new_password.is_some(),
+    )?;
+    if let Some(entries) = data.account_data.authenticator_entries.as_deref() {
+        validate_authenticator_rotation(entries, &existing_authenticators, user_id, &conn).await?;
+    }
 
     // Like upstream, a client that rotates a user key that was already replaced has to sync first
     // Ref: <https://github.com/bitwarden/server/blob/15c94ac58bf361a162381749c146d254a21b2098/src/Core/KeyManagement/UserKey/Models/Data/BaseRotateUserAccountKeysData.cs#L34-L46>
@@ -1708,93 +1784,131 @@ async fn rotate_account(data: RotateData, headers: Headers, conn: DbConn, nt: No
         }
     }
 
-    // TODO: Ideally we'd do everything after this point in a single transaction.
+    // `rotate-user-keys` cannot carry authenticator entries. Keep the previous master-key-wrapped
+    // user key until `PUT /api/authenticator/rotate` replaces every entry. The master key does not
+    // change on that path, so the stashed key stays unwrappable. A password change cannot do this.
+    let defer_authenticator = data.account_data.authenticator_entries.is_none()
+        && data.new_password.is_none()
+        && !existing_authenticators.is_empty();
+    let previous_akey = headers.user.akey.clone();
+    let previous_key_id = headers.user.key_id.clone();
 
-    // Update folder data, ignoring ids that aren't the user's, like upstream
-    for folder_data in data.account_data.folders {
-        // Skip `null` folder id entries.
-        // See: https://github.com/bitwarden/clients/issues/8453
-        if let Some(saved_folder) = folder_data.id.and_then(|id| existing_folders.iter_mut().find(|f| f.uuid == id)) {
-            saved_folder.name = folder_data.name;
-            saved_folder.save(&conn).await?;
-        }
-    }
-
-    // Like upstream, the unlock data below comes from the first entry for each, as checked above
-    for saved_emergency_access in &mut existing_emergency_access {
-        if let Some(emergency_access_data) =
-            data.unlock_data.emergency_access_unlock_data.iter().find(|ea| ea.id == saved_emergency_access.uuid)
-        {
-            saved_emergency_access.key_encrypted.clone_from(&emergency_access_data.key_encrypted);
-            saved_emergency_access.save(&conn).await?;
-        }
-    }
-
-    for membership in &mut existing_memberships {
-        if let Some(reset_password_data) = data
-            .unlock_data
-            .organization_account_recovery_unlock_data
-            .iter()
-            .find(|rp| rp.organization_id == membership.org_uuid)
-        {
-            if !is_upgrade {
-                membership.reset_password_key.clone_from(&reset_password_data.reset_password_key);
+    // One transaction for every rotation write (sqlite, mysql, and postgresql all honor BEGIN/COMMIT).
+    // Notifications are sent only after this commits.
+    let (user, device) = conn
+        .transaction(async || {
+            // Update folder data, ignoring ids that aren't the user's, like upstream
+            for folder_data in data.account_data.folders {
+                // Skip `null` folder id entries.
+                // See: https://github.com/bitwarden/clients/issues/8453
+                if let Some(saved_folder) =
+                    folder_data.id.and_then(|id| existing_folders.iter_mut().find(|f| f.uuid == id))
+                {
+                    saved_folder.name = folder_data.name;
+                    saved_folder.save(&conn).await?;
+                }
             }
-            membership.v2_upgrade_token.clone_from(&upgrade_token);
-            membership.save(&conn).await?;
-        }
-    }
 
-    // Update send data
-    for send_data in data.account_data.sends {
-        if let Some(send) = send_data.id.as_ref().and_then(|id| existing_sends.iter_mut().find(|s| &s.uuid == id)) {
-            // Like upstream, only the key changes on rotation
-            send.akey = send_data.key;
-            send.save(&conn).await?;
-        }
-    }
+            // Like upstream, the unlock data below comes from the first entry for each, as checked above
+            for saved_emergency_access in &mut existing_emergency_access {
+                if let Some(emergency_access_data) =
+                    data.unlock_data.emergency_access_unlock_data.iter().find(|ea| ea.id == saved_emergency_access.uuid)
+                {
+                    saved_emergency_access.key_encrypted.clone_from(&emergency_access_data.key_encrypted);
+                    saved_emergency_access.save(&conn).await?;
+                }
+            }
 
-    // Update cipher data
-    for cipher_data in data.account_data.ciphers {
-        if cipher_data.organization_id.is_none()
-            && let Some(saved_cipher) =
-                cipher_data.id.as_ref().and_then(|id| existing_ciphers.iter_mut().find(|c| &c.uuid == id))
-        {
-            // No cipher pushes: the other sessions still hold the old user key
-            rotate_cipher_data(saved_cipher, cipher_data, &headers, &conn, &nt).await?;
-        }
-    }
+            for membership in &mut existing_memberships {
+                if let Some(reset_password_data) = data
+                    .unlock_data
+                    .organization_account_recovery_unlock_data
+                    .iter()
+                    .find(|rp| rp.organization_id == membership.org_uuid)
+                {
+                    if !is_upgrade {
+                        membership.reset_password_key.clone_from(&reset_password_data.reset_password_key);
+                    }
+                    membership.v2_upgrade_token.clone_from(&upgrade_token);
+                    membership.save(&conn).await?;
+                }
+            }
 
-    // Update user data
-    let mut user = headers.user;
-    user.v2_upgrade_token = upgrade_token;
+            // Update send data
+            for send_data in data.account_data.sends {
+                if let Some(send) =
+                    send_data.id.as_ref().and_then(|id| existing_sends.iter_mut().find(|s| &s.uuid == id))
+                {
+                    // Like upstream, only the key changes on rotation
+                    send.akey = send_data.key;
+                    send.save(&conn).await?;
+                }
+            }
 
-    data.account_keys.apply(&mut user)?;
-    // The old id names a key that no longer exists, so it is replaced even when the new key has none.
-    user.key_id = data.new_user_key_id;
+            // Authenticator ciphertext only. One account revision is written with the user below.
+            if let Some(authenticator_entries) = data.account_data.authenticator_entries {
+                for rotation in authenticator_entries {
+                    if let Some(saved) = existing_authenticators.iter_mut().find(|entry| entry.uuid == rotation.id) {
+                        let updated = reencrypted_content(saved, &rotation)?;
+                        saved.name = updated.name;
+                        saved.issuer = updated.issuer;
+                        saved.secret = updated.secret;
+                        saved.notes = updated.notes;
+                        saved.save_without_user_revision(&conn).await?;
+                    }
+                }
+            }
 
-    user.akey = data.wrapped_user_key;
-    if let Some((new_password_hash, new_password_hint)) = data.new_password {
-        // A password change ends every session, as `/accounts/password` does
-        user.password_hint = new_password_hint;
-        user.set_password(&new_password_hash, None, true, None, &conn).await?;
-    } else if !is_upgrade {
-        // An upgrade keeps the sessions alive, see `is_upgrade` above
-        user.reset_security_stamp_after_key_rotation(&conn).await?;
-    }
+            // Update cipher data
+            for cipher_data in data.account_data.ciphers {
+                if cipher_data.organization_id.is_none()
+                    && let Some(saved_cipher) =
+                        cipher_data.id.as_ref().and_then(|id| existing_ciphers.iter_mut().find(|c| &c.uuid == id))
+                {
+                    // No cipher pushes: the other sessions still hold the old user key
+                    rotate_cipher_data(saved_cipher, cipher_data, &headers, &conn, &nt).await?;
+                }
+            }
 
-    // The key pair first, so that a v2 account is never saved without one. The data above is already re-encrypted by
-    // now, and for an account that was already v2 so is the signing key saved here, so a failure in either save
-    // leaves them under a key that isn't stored (see the TODO before the first write).
-    data.account_keys.save_signature_key_pair(&user.uuid, &conn).await?;
-    user.save(&conn).await?;
+            // Update user data
+            let device = headers.device;
+            let mut user = headers.user;
+            user.v2_upgrade_token = upgrade_token;
+
+            data.account_keys.apply(&mut user)?;
+            // The old id names a key that no longer exists, so it is replaced even when the new key has none.
+            user.key_id = data.new_user_key_id;
+
+            user.akey = data.wrapped_user_key;
+            if defer_authenticator {
+                user.authenticator_legacy_key = Some(previous_akey);
+                user.authenticator_legacy_key_id = previous_key_id;
+            } else {
+                user.authenticator_legacy_key = None;
+                user.authenticator_legacy_key_id = None;
+            }
+            if let Some((new_password_hash, new_password_hint)) = data.new_password {
+                // A password change ends every session, as `/accounts/password` does
+                user.password_hint = new_password_hint;
+                user.set_password(&new_password_hash, None, true, None, &conn).await?;
+            } else if !is_upgrade {
+                // An upgrade keeps the sessions alive, see `is_upgrade` above
+                user.reset_security_stamp_after_key_rotation(&conn).await?;
+            }
+
+            // The key pair first, so that a v2 account is never saved without one.
+            data.account_keys.save_signature_key_pair(&user.uuid, &conn).await?;
+            user.save(&conn).await?;
+            Ok((user, device))
+        })
+        .await?;
 
     // Prevent logging out the client where the user requested this endpoint from.
     // If you do logout the user it will causes issues at the client side.
     // Adding the device uuid will prevent this.
     // On an upgrade, the reason lets clients sync instead
     let reason = is_upgrade.then_some(LogOutReason::KeyRotation);
-    nt.send_logout_with_reason(&user, Some(&headers.device), reason, &conn).await;
+    nt.send_logout_with_reason(&user, Some(&device), reason, &conn).await;
 
     Ok(())
 }
@@ -2787,5 +2901,442 @@ mod tests {
         assert_eq!(data.compat.key(), "key");
         assert_eq!(data.compat.kdf().kdf_iterations, 600_000);
         assert!(data.keys.is_some());
+    }
+}
+
+#[cfg(all(test, sqlite))]
+mod authenticator_rotation_tests {
+    use std::sync::Arc;
+
+    use chrono::Datelike;
+    use diesel::connection::SimpleConnection;
+    use rocket::serde::json::Json;
+
+    use super::*;
+    use crate::{
+        api::notifications::{WS_USERS, WebSocketUsers},
+        db::{models::AuthenticatorEntryFields, test_db},
+    };
+
+    const OLD_HASH: &str = "old-auth-hash";
+    const NEW_HASH: &str = "new-auth-hash";
+
+    fn headers_for(user: User) -> Headers {
+        Headers {
+            host: "http://localhost".into(),
+            device: Device::new(String::from("test").into(), user.uuid.clone(), String::from("test"), 1),
+            user,
+            ip: ClientIp {
+                ip: "127.0.0.1".parse().unwrap(),
+            },
+        }
+    }
+
+    async fn prepare_user(conn: &DbConn, email: &str) -> User {
+        let mut user = User::new(email, None);
+        user.public_key = Some(String::from("pub"));
+        user.set_password(OLD_HASH, Some(String::from("old-key")), false, None, conn).await.unwrap();
+        user.save(conn).await.unwrap();
+        User::find_by_uuid(&user.uuid, conn).await.unwrap()
+    }
+
+    fn rotation_request(email: &str, entries: Option<Value>) -> KeyData {
+        let mut account_data = json!({
+            "ciphers": [],
+            "folders": [],
+            "sends": [],
+        });
+        if let Some(entries) = entries {
+            account_data["authenticatorEntries"] = entries;
+        }
+        serde_json::from_value(json!({
+            "oldMasterKeyAuthenticationHash": OLD_HASH,
+            "accountKeys": {
+                "userKeyEncryptedAccountPrivateKey": "2.private",
+                "accountPublicKey": "pub"
+            },
+            "accountUnlockData": {
+                "masterPasswordUnlockData": {
+                    "kdfType": User::CLIENT_KDF_TYPE_DEFAULT,
+                    "iterations": User::CLIENT_KDF_ITER_DEFAULT,
+                    "email": email,
+                    "masterKeyAuthenticationHash": NEW_HASH,
+                    "masterKeyEncryptedUserKey": "2.userkey"
+                },
+                "emergencyAccessUnlockData": [],
+                "organizationAccountRecoveryUnlockData": [],
+                "passkeyUnlockData": [],
+                "deviceKeyUnlockData": []
+            },
+            "accountData": account_data
+        }))
+        .unwrap()
+    }
+
+    fn rotated_item(
+        entry: &AuthenticatorEntry,
+        name: &str,
+        secret: &str,
+        issuer: Option<&str>,
+        notes: Option<&str>,
+    ) -> Value {
+        let mut value = json!({
+            "id": entry.uuid,
+            "name": name,
+            "secret": secret,
+            "algorithm": entry.algorithm,
+            "digits": entry.digits,
+            "period": entry.period,
+            "favorite": entry.favorite,
+            "sortOrder": entry.sort_order,
+        });
+        if let Some(issuer) = issuer {
+            value["issuer"] = json!(issuer);
+        }
+        if let Some(notes) = notes {
+            value["notes"] = json!(notes);
+        }
+        value
+    }
+
+    #[test]
+    fn key_rotation_requires_and_replaces_authenticator_entries() {
+        test_db::run(async |db| {
+            let conn = db.conn();
+            let owner = prepare_user(&conn, "owner-rotate@example.com").await;
+            let owner_id = owner.uuid.clone();
+            let other = prepare_user(&conn, "other-rotate@example.com").await;
+            let mut foreign = AuthenticatorEntry::new(
+                other.uuid.clone(),
+                AuthenticatorEntryFields {
+                    name: String::from("2.AAAA|AAAA|AAAA"),
+                    issuer: None,
+                    secret: String::from("2.AAAA|AAAA|AAAB"),
+                    algorithm: String::from("SHA1"),
+                    digits: 6,
+                    period: 30,
+                    notes: None,
+                    favorite: false,
+                    sort_order: 0,
+                },
+            );
+            foreign.save(&conn).await.unwrap();
+
+            let mut with_issuer = AuthenticatorEntry::new(
+                owner_id.clone(),
+                AuthenticatorEntryFields {
+                    name: String::from("2.AAAA|AAAA|AAAC"),
+                    issuer: Some(String::from("2.AAAA|AAAA|AAAD")),
+                    secret: String::from("2.AAAA|AAAA|AAAE"),
+                    algorithm: String::from("SHA256"),
+                    digits: 8,
+                    period: 60,
+                    notes: Some(String::from("2.AAAA|AAAA|AAAF")),
+                    favorite: true,
+                    sort_order: 4,
+                },
+            );
+            with_issuer.save(&conn).await.unwrap();
+            let mut plain = AuthenticatorEntry::new(
+                owner_id.clone(),
+                AuthenticatorEntryFields {
+                    name: String::from("2.AAAA|AAAA|AAAG"),
+                    issuer: None,
+                    secret: String::from("2.AAAA|AAAA|AAAH"),
+                    algorithm: String::from("SHA1"),
+                    digits: 6,
+                    period: 30,
+                    notes: None,
+                    favorite: false,
+                    sort_order: 1,
+                },
+            );
+            plain.save(&conn).await.unwrap();
+
+            let rocket = rocket::build().manage(Arc::clone(&WS_USERS));
+            let notify: Notify<'_> = rocket.state::<Arc<WebSocketUsers>>().unwrap().into();
+            conn.run(|c| c.batch_execute("UPDATE users SET updated_at='2000-01-01 00:00:00'")).await.unwrap();
+
+            let rotate = |entries: Option<Value>, user: User| {
+                let email = user.email.clone();
+                let request = rotation_request(&email, entries);
+                post_rotatekey(Json(request), headers_for(user), db.conn(), notify)
+            };
+
+            let missing_field = rotate(None, User::find_by_uuid(&owner_id, &conn).await.unwrap()).await.unwrap_err();
+            assert!(missing_field.to_string().contains("authenticatorEntries"));
+            assert_eq!(
+                AuthenticatorEntry::find_by_uuid_and_user(&with_issuer.uuid, &owner_id, &conn).await.unwrap().secret,
+                "2.AAAA|AAAA|AAAE"
+            );
+            assert_eq!(User::find_by_uuid(&owner_id, &conn).await.unwrap().updated_at.year(), 2000);
+
+            let incomplete = json!([rotated_item(
+                &with_issuer,
+                "2.AAAA|AAAA|AAAI",
+                "2.AAAA|AAAA|AAAJ",
+                Some("2.AAAA|AAAA|AAAK"),
+                Some("2.AAAA|AAAA|AAAL")
+            )]);
+            let missing_one =
+                rotate(Some(incomplete), User::find_by_uuid(&owner_id, &conn).await.unwrap()).await.unwrap_err();
+            assert!(missing_one.to_string().contains("All existing authenticator entries"));
+
+            let mut both = vec![
+                rotated_item(
+                    &with_issuer,
+                    "2.AAAA|AAAA|AAAI",
+                    "2.AAAA|AAAA|AAAJ",
+                    Some("2.AAAA|AAAA|AAAK"),
+                    Some("2.AAAA|AAAA|AAAL"),
+                ),
+                rotated_item(&plain, "2.AAAA|AAAA|AAAM", "2.AAAA|AAAA|AAAN", None, None),
+            ];
+            both.push(rotated_item(&foreign, "2.AAAA|AAAA|AAAO", "2.AAAA|AAAA|AAAP", None, None));
+            let foreign_id =
+                rotate(Some(json!(both)), User::find_by_uuid(&owner_id, &conn).await.unwrap()).await.unwrap_err();
+            assert!(foreign_id.to_string().contains("belongs to another user"));
+            both.pop();
+
+            let mut changed = both.clone();
+            changed[0]["digits"] = json!(6);
+            let changed_digits =
+                rotate(Some(json!(changed)), User::find_by_uuid(&owner_id, &conn).await.unwrap()).await.unwrap_err();
+            assert!(changed_digits.to_string().contains("cannot change during key rotation"));
+
+            let mut dropped_issuer = both.clone();
+            dropped_issuer[0].as_object_mut().unwrap().remove("issuer");
+            let dropped = rotate(Some(json!(dropped_issuer)), User::find_by_uuid(&owner_id, &conn).await.unwrap())
+                .await
+                .unwrap_err();
+            assert!(dropped.to_string().contains("must be re-encrypted"));
+
+            conn.run(|c| {
+                c.batch_execute(
+                    "UPDATE authenticator_entries SET creation_date='1999-01-01 00:00:00', revision_date='2000-01-01 00:00:00'",
+                )
+            })
+            .await
+            .unwrap();
+            rotate(Some(json!(both)), User::find_by_uuid(&owner_id, &conn).await.unwrap()).await.unwrap();
+
+            let updated = AuthenticatorEntry::find_by_uuid_and_user(&with_issuer.uuid, &owner_id, &conn).await.unwrap();
+            assert_eq!(updated.name, "2.AAAA|AAAA|AAAI");
+            assert_eq!(updated.issuer.as_deref(), Some("2.AAAA|AAAA|AAAK"));
+            assert_eq!(updated.secret, "2.AAAA|AAAA|AAAJ");
+            assert_eq!(updated.notes.as_deref(), Some("2.AAAA|AAAA|AAAL"));
+            assert_eq!(updated.algorithm, "SHA256");
+            assert_eq!(updated.digits, 8);
+            assert_eq!(updated.period, 60);
+            assert!(updated.favorite);
+            assert_eq!(updated.sort_order, 4);
+            assert_eq!(updated.creation_date.year(), 1999);
+            assert!(updated.revision_date.year() > 2000);
+            let plain_updated = AuthenticatorEntry::find_by_uuid_and_user(&plain.uuid, &owner_id, &conn).await.unwrap();
+            assert_eq!(plain_updated.secret, "2.AAAA|AAAA|AAAN");
+            assert!(plain_updated.issuer.is_none());
+            assert!(plain_updated.notes.is_none());
+            let owner = User::find_by_uuid(&owner_id, &conn).await.unwrap();
+            assert!(owner.updated_at.year() > 2000);
+            assert!(owner.check_valid_password(NEW_HASH));
+            assert_eq!(owner.private_key.as_deref(), Some("2.private"));
+
+            let sync = super::super::ciphers::sync(
+                super::super::ciphers::SyncData::default(),
+                headers_for(owner),
+                None,
+                db.conn(),
+            )
+            .await
+            .unwrap()
+            .into_inner();
+            let synced = sync["authenticatorEntries"].as_array().unwrap();
+            assert_eq!(synced.len(), 2);
+            let item = synced.iter().find(|item| item["id"] == json!(with_issuer.uuid)).unwrap();
+            let mut keys: Vec<_> = item.as_object().unwrap().keys().map(String::as_str).collect();
+            keys.sort_unstable();
+            assert_eq!(
+                keys,
+                [
+                    "algorithm",
+                    "creationDate",
+                    "digits",
+                    "favorite",
+                    "id",
+                    "issuer",
+                    "name",
+                    "notes",
+                    "object",
+                    "period",
+                    "revisionDate",
+                    "secret",
+                    "sortOrder",
+                ]
+            );
+            assert_eq!(item["object"], "authenticatorEntry");
+            assert_eq!(item["secret"], "2.AAAA|AAAA|AAAJ");
+            assert_eq!(item["algorithm"], "SHA256");
+            assert_eq!(sync["authenticatorKeyRotation"]["required"], false);
+
+            let empty = prepare_user(&conn, "empty-rotate@example.com").await;
+            rotate(None, empty).await.unwrap();
+        });
+    }
+
+    fn sdk_rotation_request(email: &str, entries: Option<Value>) -> RotateUserKeysData {
+        let mut account_data = json!({
+            "ciphers": [],
+            "folders": [],
+            "sends": [],
+        });
+        if let Some(entries) = entries {
+            account_data["authenticatorEntries"] = entries;
+        }
+        serde_json::from_value(json!({
+            "wrappedAccountCryptographicState": {
+                "publicKeyEncryptionKeyPair": {
+                    "wrappedPrivateKey": "7.YWJjZA==",
+                    "publicKey": "pub",
+                    "signedPublicKey": "signed-pub"
+                },
+                "signatureKeyPair": {
+                    "signatureAlgorithm": "ed25519",
+                    "wrappedSigningKey": "7.YWJjZA==",
+                    "verifyingKey": "verify-key"
+                },
+                "securityState": {"securityState": "state", "securityVersion": 2}
+            },
+            "unlockData": {
+                "emergencyAccessUnlockData": [],
+                "organizationAccountRecoveryUnlockData": [],
+                "passkeyUnlockData": [],
+                "deviceKeyUnlockData": []
+            },
+            "accountData": account_data,
+            "unlockMethodData": {
+                "unlockMethod": 1,
+                "masterPasswordUnlockData": {
+                    "salt": email,
+                    "kdf": {"kdfType": User::CLIENT_KDF_TYPE_DEFAULT, "iterations": User::CLIENT_KDF_ITER_DEFAULT},
+                    "masterKeyWrappedUserKey": "wrapped-new-user-key"
+                }
+            }
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn sdk_rotate_user_keys_defers_authenticator_reencryption() {
+        test_db::run(async |db| {
+            let conn = db.conn();
+            let owner = prepare_user(&conn, "sdk-rotate@example.com").await;
+            let owner_id = owner.uuid.clone();
+            let mut entry = AuthenticatorEntry::new(
+                owner_id.clone(),
+                AuthenticatorEntryFields {
+                    name: String::from("2.AAAA|AAAA|AAAA"),
+                    issuer: None,
+                    secret: String::from("2.AAAA|AAAA|AAAB"),
+                    algorithm: String::from("SHA1"),
+                    digits: 6,
+                    period: 30,
+                    notes: None,
+                    favorite: false,
+                    sort_order: 0,
+                },
+            );
+            entry.save(&conn).await.unwrap();
+
+            let rocket = rocket::build().manage(Arc::clone(&WS_USERS));
+            let notify: Notify<'_> = rocket.state::<Arc<WebSocketUsers>>().unwrap().into();
+            let email = owner.email.clone();
+            post_rotate_user_keys(Json(sdk_rotation_request(&email, None)), headers_for(owner), db.conn(), notify)
+                .await
+                .unwrap();
+
+            let owner = User::find_by_uuid(&owner_id, &conn).await.unwrap();
+            assert_eq!(owner.akey, "wrapped-new-user-key");
+            assert_eq!(owner.authenticator_legacy_key.as_deref(), Some("old-key"));
+            assert_eq!(
+                AuthenticatorEntry::find_by_uuid_and_user(&entry.uuid, &owner_id, &conn).await.unwrap().secret,
+                "2.AAAA|AAAA|AAAB"
+            );
+            let sync = super::super::ciphers::sync(
+                super::super::ciphers::SyncData::default(),
+                headers_for(owner),
+                None,
+                db.conn(),
+            )
+            .await
+            .unwrap()
+            .into_inner();
+            assert_eq!(sync["authenticatorKeyRotation"]["required"], true);
+            assert_eq!(sync["authenticatorKeyRotation"]["wrappedOldUserKey"], "old-key");
+            assert_eq!(sync["authenticatorEntries"][0]["secret"], "2.AAAA|AAAA|AAAB");
+
+            let again = post_rotate_user_keys(
+                Json(sdk_rotation_request(&email, None)),
+                headers_for(User::find_by_uuid(&owner_id, &conn).await.unwrap()),
+                db.conn(),
+                notify,
+            )
+            .await
+            .unwrap_err();
+            assert!(again.to_string().contains("before another key rotation"));
+            assert_eq!(
+                User::find_by_uuid(&owner_id, &conn).await.unwrap().authenticator_legacy_key.as_deref(),
+                Some("old-key")
+            );
+
+            let not_waiting = prepare_user(&conn, "sdk-plain@example.com").await;
+            let early = super::super::authenticator::put_authenticator_rotation(
+                Json(super::super::authenticator::AuthenticatorRotateRequest {
+                    authenticator_entries: vec![
+                        serde_json::from_value(json!({
+                            "id": entry.uuid,
+                            "name": "2.AAAA|AAAA|AAAC",
+                            "secret": "2.AAAA|AAAA|AAAD"
+                        }))
+                        .unwrap(),
+                    ],
+                }),
+                headers_for(not_waiting),
+                db.conn(),
+                notify,
+            )
+            .await
+            .unwrap_err();
+            assert!(early.to_string().contains("not waiting"));
+
+            let rotated = super::super::authenticator::put_authenticator_rotation(
+                Json(super::super::authenticator::AuthenticatorRotateRequest {
+                    authenticator_entries: vec![
+                        serde_json::from_value(json!({
+                            "id": entry.uuid,
+                            "name": "2.AAAA|AAAA|AAAC",
+                            "secret": "2.AAAA|AAAA|AAAD",
+                            "algorithm": "SHA1",
+                            "digits": 6,
+                            "period": 30,
+                            "favorite": false,
+                            "sortOrder": 0
+                        }))
+                        .unwrap(),
+                    ],
+                }),
+                headers_for(User::find_by_uuid(&owner_id, &conn).await.unwrap()),
+                db.conn(),
+                notify,
+            )
+            .await
+            .unwrap()
+            .into_inner();
+            assert_eq!(rotated["data"][0]["secret"], "2.AAAA|AAAA|AAAD");
+            let owner = User::find_by_uuid(&owner_id, &conn).await.unwrap();
+            assert!(owner.authenticator_legacy_key.is_none());
+            assert!(owner.authenticator_legacy_key_id.is_none());
+            let status = super::super::authenticator::get_authenticator_rotation(headers_for(owner)).into_inner();
+            assert_eq!(status["required"], false);
+        });
     }
 }

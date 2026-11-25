@@ -21,10 +21,10 @@ use crate::{
     db::{
         DbConn, DbPool,
         models::{
-            Archive, Attachment, AttachmentId, Cipher, CipherAccessScope, CipherId, Collection, CollectionCipher,
-            CollectionGroup, CollectionId, CollectionUser, CustomPermission, EventType, Favorite, Folder, FolderCipher,
-            FolderId, Group, KeyId, Membership, MembershipType, OrgPolicy, OrgPolicyType, OrganizationId, RepromptType,
-            Send, User, UserId, is_data_blob_encrypted,
+            Archive, Attachment, AttachmentId, AuthenticatorEntry, Cipher, CipherAccessScope, CipherId, Collection,
+            CollectionCipher, CollectionGroup, CollectionId, CollectionUser, CustomPermission, EventType, Favorite,
+            Folder, FolderCipher, FolderId, Group, KeyId, Membership, MembershipType, OrgPolicy, OrgPolicyType,
+            OrganizationId, RepromptType, Send, User, UserId, is_data_blob_encrypted,
         },
     },
     util::{NumberOrString, deser_opt_nonempty_str, save_temp_file},
@@ -116,13 +116,18 @@ pub async fn purge_trashed_ciphers(pool: DbPool) {
 }
 
 #[derive(FromForm, Default)]
-struct SyncData {
+pub(crate) struct SyncData {
     #[field(name = "excludeDomains")]
     exclude_domains: bool, // Default: 'false'
 }
 
 #[get("/sync?<data..>")]
-async fn sync(data: SyncData, headers: Headers, client_version: Option<ClientVersion>, conn: DbConn) -> JsonResult {
+pub(crate) async fn sync(
+    data: SyncData,
+    headers: Headers,
+    client_version: Option<ClientVersion>,
+    conn: DbConn,
+) -> JsonResult {
     let user_json = headers.user.to_json(&conn).await;
 
     // Get all ciphers which are visible by the user
@@ -160,6 +165,14 @@ async fn sync(data: SyncData, headers: Headers, client_version: Option<ClientVer
 
     let sends_json: Vec<Value> =
         Send::find_by_user(&headers.user.uuid, &conn).await.iter().map(Send::to_json).collect();
+
+    // Official clients ignore unknown sync fields. The forked extension reads this list.
+    let authenticator_entries_json: Vec<Value> = AuthenticatorEntry::find_by_user(&headers.user.uuid, &conn)
+        .await?
+        .iter()
+        .map(AuthenticatorEntry::to_json)
+        .collect();
+    let authenticator_key_rotation_json = super::authenticator::authenticator_key_rotation_json(&headers.user);
 
     let policies_json: Vec<Value> =
         OrgPolicy::find_confirmed_by_user(&headers.user.uuid, &conn).await.iter().map(OrgPolicy::to_json).collect();
@@ -216,6 +229,8 @@ async fn sync(data: SyncData, headers: Headers, client_version: Option<ClientVer
         "ciphers": ciphers_json,
         "domains": domains_json,
         "sends": sends_json,
+        "authenticatorEntries": authenticator_entries_json,
+        "authenticatorKeyRotation": authenticator_key_rotation_json,
         "userDecryption": user_decryption,
         "object": "sync"
     })))

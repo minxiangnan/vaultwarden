@@ -6,8 +6,9 @@ use std::{
 
 use chrono::{NaiveDateTime, Utc};
 use rmpv::Value;
-use rocket::{Route, futures::StreamExt};
+use rocket::{Route, futures::StreamExt, serde::json::Json};
 use rocket_ws::{Message, WebSocket};
+use serde_json::json;
 use tokio::sync::mpsc::Sender;
 
 use crate::{
@@ -15,13 +16,16 @@ use crate::{
     auth::{ClientIp, WsAccessTokenHeader},
     db::{
         DbConn,
-        models::{AuthRequestId, Cipher, CollectionId, Device, DeviceId, Folder, PushId, Send as DbSend, User, UserId},
+        models::{
+            AuthRequestId, AuthenticatorEntry, Cipher, CollectionId, Device, DeviceId, Folder, PushId, Send as DbSend,
+            User, UserId,
+        },
     },
 };
 
 use super::{
-    push::push_auth_request, push::push_auth_response, push_cipher_update, push_folder_update, push_logout,
-    push_send_update, push_user_update,
+    push::push_auth_request, push::push_auth_response, push_authenticator_update, push_cipher_update,
+    push_folder_update, push_logout, push_send_update, push_user_update,
 };
 
 pub static WS_USERS: LazyLock<Arc<WebSocketUsers>> = LazyLock::new(|| {
@@ -53,11 +57,58 @@ static NOTIFICATIONS_DISABLED: LazyLock<bool> = LazyLock::new(|| !CONFIG.enable_
 
 pub fn routes() -> Vec<Route> {
     if CONFIG.enable_websocket() {
-        routes![websockets_hub, anonymous_websockets_hub]
+        routes![hub_negotiate, websockets_hub, anonymous_websockets_hub]
     } else {
         info!("WebSocket are disabled, realtime sync functionality will not work!");
         routes![]
     }
+}
+
+#[derive(FromForm)]
+struct NegotiateRequest {
+    #[field(name = "negotiateVersion")]
+    negotiate_version: Option<i32>,
+    access_token: Option<String>,
+}
+
+fn require_login(
+    query_token: Option<String>,
+    header_token: Option<String>,
+) -> Result<crate::auth::LoginJwtClaims, Error> {
+    let Some(token) = query_token.or(header_token) else {
+        err_code!("Invalid claim", 401)
+    };
+    if let Ok(claims) = crate::auth::decode_login(&token) {
+        Ok(claims)
+    } else {
+        err_code!("Invalid token", 401)
+    }
+}
+
+/// SignalR's default client posts here before opening `/hub`. The id is opaque: the hub
+/// still authenticates the socket with the access token and keeps every connection for the user.
+#[post("/hub/negotiate?<data..>")]
+fn hub_negotiate(data: NegotiateRequest, header_token: WsAccessTokenHeader) -> Result<Json<serde_json::Value>, Error> {
+    require_login(data.access_token, header_token.access_token)?;
+    let id = uuid::Uuid::new_v4().to_string();
+    let transports = json!([{
+        "transport": "WebSockets",
+        "transferFormats": ["Text", "Binary"]
+    }]);
+    let body = if data.negotiate_version.unwrap_or(0) >= 1 {
+        json!({
+            "negotiateVersion": 1,
+            "connectionId": id,
+            "connectionToken": id,
+            "availableTransports": transports,
+        })
+    } else {
+        json!({
+            "connectionId": id,
+            "availableTransports": transports,
+        })
+    };
+    Ok(Json(body))
 }
 
 #[derive(FromForm, Debug)]
@@ -136,17 +187,7 @@ fn websockets_hub<'r>(
 ) -> Result<rocket_ws::Stream!['r], Error> {
     info!("Accepting Rocket WS connection from {}", ip.ip);
 
-    let token = if let Some(token) = data.access_token {
-        token
-    } else if let Some(token) = header_token.access_token {
-        token
-    } else {
-        err_code!("Invalid claim", 401)
-    };
-
-    let Ok(claims) = crate::auth::decode_login(&token) else {
-        err_code!("Invalid token", 401)
-    };
+    let claims = require_login(data.access_token, header_token.access_token)?;
 
     let (mut rx, guard) = {
         let users = Arc::clone(&WS_USERS);
@@ -468,6 +509,38 @@ impl WebSocketUsers {
         }
     }
 
+    pub async fn send_authenticator_update(
+        &self,
+        ut: UpdateType,
+        entry: &AuthenticatorEntry,
+        device: &Device,
+        conn: &DbConn,
+    ) {
+        // Skip any processing if both WebSockets and Push are not active
+        if *NOTIFICATIONS_DISABLED {
+            return;
+        }
+        // Every socket for this user, including the device that wrote the entry. ContextId is that
+        // device id so the client can ignore its own echo. Upstream does not drop the actor either.
+        let data = create_update(
+            vec![
+                ("Id".into(), entry.uuid.to_string().into()),
+                ("UserId".into(), entry.user_uuid.to_string().into()),
+                ("RevisionDate".into(), serialize_date(entry.revision_date)),
+            ],
+            ut,
+            Some(device.uuid.clone()),
+        );
+
+        if CONFIG.enable_websocket() {
+            self.send_update(&entry.user_uuid, &data).await;
+        }
+
+        if CONFIG.push_enabled() {
+            push_authenticator_update(ut, entry, device, conn).await;
+        }
+    }
+
     pub async fn send_cipher_update(
         &self,
         ut: UpdateType,
@@ -745,8 +818,373 @@ pub enum UpdateType {
     // NotificationStatus = 21, // Not supported
 
     // RefreshSecurityTasks = 22, // Not supported
+
+    // Fork-only standalone authenticator entries. Official clients ignore unknown types.
+    SyncAuthenticatorCreate = 30,
+    SyncAuthenticatorUpdate = 31,
+    SyncAuthenticatorDelete = 32,
+
     None = 100,
 }
 
 pub type Notify<'a> = &'a rocket::State<Arc<WebSocketUsers>>;
 pub type AnonymousNotify<'a> = &'a rocket::State<Arc<AnonymousWebSocketSubscriptions>>;
+
+#[cfg(all(test, sqlite))]
+mod ws_tests {
+    use std::{
+        io::{Read, Write},
+        net::TcpStream,
+        time::Duration,
+    };
+
+    use serde_json::Value;
+
+    const ENC: &str = "2.AAAA|AAAA|AAAA";
+    const DEVICE_A: &str = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+    const DEVICE_B: &str = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
+
+    /// Negotiate, then open two hub sockets for one user. Device A's create/update/delete must
+    /// push types 30/31/32 to device B. The acting socket is not dropped: upstream leaves that
+    /// to the client, which ignores a ContextId equal to its own device id.
+    #[test]
+    fn two_device_hubs_receive_authenticator_notifications() {
+        if std::env::var_os("VAULTWARDEN_WS_AUTHENTICATOR_TEST").is_none() {
+            let dir = std::env::temp_dir().join(format!("vw-ws-authn-{}", std::process::id()));
+            std::fs::remove_dir_all(&dir).ok();
+            std::fs::create_dir_all(&dir).unwrap();
+            let db = dir.join("db.sqlite3");
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", std::thread::current().name().unwrap(), "--nocapture"])
+                .env("VAULTWARDEN_WS_AUTHENTICATOR_TEST", "1")
+                .env("DATA_FOLDER", &dir)
+                .env("DATABASE_URL", format!("sqlite://{}", db.display()))
+                .env("ENABLE_WEBSOCKET", "true")
+                .env("DOMAIN", "http://127.0.0.1")
+                .env("WEB_VAULT_ENABLED", "false")
+                .output()
+                .unwrap();
+            std::fs::remove_dir_all(&dir).ok();
+            assert!(
+                output.status.success() && String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap().block_on(run());
+    }
+
+    async fn run() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+
+        crate::auth::initialize_keys().await.unwrap();
+        let pool = crate::db::DbPool::from_config().unwrap();
+        let conn = pool.get().await.unwrap();
+        let mut user =
+            crate::db::models::User::new(&format!("ws-{}@example.com", uuid::Uuid::new_v4()), Some("WS".into()));
+        user.save(&conn).await.unwrap();
+        let mut device_a =
+            crate::db::models::Device::new(DEVICE_A.to_owned().into(), user.uuid.clone(), "A".into(), 14);
+        let mut device_b =
+            crate::db::models::Device::new(DEVICE_B.to_owned().into(), user.uuid.clone(), "B".into(), 14);
+        device_a.save(false, &conn).await.unwrap();
+        device_b.save(false, &conn).await.unwrap();
+        let token_a = crate::auth::LoginJwtClaims::default(
+            &device_a,
+            &user,
+            &crate::auth::AuthMethod::Password,
+            Some("web".into()),
+        )
+        .token();
+        let token_b = crate::auth::LoginJwtClaims::default(
+            &device_b,
+            &user,
+            &crate::auth::AuthMethod::Password,
+            Some("web".into()),
+        )
+        .token();
+        let user_id = user.uuid.to_string();
+        drop(conn);
+
+        let mut config = rocket::Config::from(rocket::Config::figment());
+        config.address = "127.0.0.1".parse().unwrap();
+        config.port = port;
+        config.log_level = rocket::config::LogLevel::Critical;
+        let rocket = rocket::custom(config)
+            .mount("/api", crate::api::core::routes())
+            .mount("/notifications", super::routes())
+            .manage(pool)
+            .manage(std::sync::Arc::clone(&super::WS_USERS))
+            .manage(std::sync::Arc::clone(&super::WS_ANONYMOUS_SUBSCRIPTIONS))
+            .ignite()
+            .await
+            .unwrap();
+        let shutdown = rocket.shutdown();
+        let launched = tokio::spawn(async move { rocket.launch().await });
+        for _ in 0..50 {
+            if TcpStream::connect(("127.0.0.1", port)).is_ok() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        let (unauth, _) = http(port, "POST", "/notifications/hub/negotiate?negotiateVersion=1", None, None);
+        assert_eq!(unauth, 401);
+
+        let id_a = negotiate(port, &token_a);
+        let id_b = negotiate(port, &token_b);
+        let (ready_a_tx, ready_a_rx) = std::sync::mpsc::channel();
+        let (ready_b_tx, ready_b_rx) = std::sync::mpsc::channel();
+        let (notes_a_tx, notes_a_rx) = std::sync::mpsc::channel();
+        let (notes_b_tx, notes_b_rx) = std::sync::mpsc::channel();
+        let thread_a = std::thread::spawn({
+            let token = token_a.clone();
+            move || notes_a_tx.send(collect_notifications(port, &token, &id_a, &ready_a_tx)).unwrap()
+        });
+        let thread_b = std::thread::spawn({
+            let token = token_b.clone();
+            move || notes_b_tx.send(collect_notifications(port, &token, &id_b, &ready_b_tx)).unwrap()
+        });
+        ready_a_rx.recv_timeout(Duration::from_secs(8)).expect("device A hub");
+        ready_b_rx.recv_timeout(Duration::from_secs(8)).expect("device B hub");
+
+        let created = api(
+            port,
+            "POST",
+            "/api/authenticator",
+            &token_a,
+            Some(&json!({
+                "name": ENC, "secret": ENC
+            })),
+        );
+        let entry_id = created["id"].as_str().unwrap().to_owned();
+        api(
+            port,
+            "PUT",
+            &format!("/api/authenticator/{entry_id}"),
+            &token_a,
+            Some(&json!({
+                "name": ENC, "secret": "2.AAAA|AAAA|AAAB"
+            })),
+        );
+        api(port, "DELETE", &format!("/api/authenticator/{entry_id}"), &token_a, None);
+
+        let notes_a = notes_a_rx
+            .recv_timeout(Duration::from_secs(8))
+            .unwrap_or_else(|err| panic!("device A notifications: {err}, thread: {:?}", thread_a.join()));
+        let notes_b = notes_b_rx
+            .recv_timeout(Duration::from_secs(8))
+            .unwrap_or_else(|err| panic!("device B notifications: {err}, thread: {:?}", thread_b.join()));
+        assert_notifications(&notes_a, &entry_id, &user_id);
+        assert_notifications(&notes_b, &entry_id, &user_id);
+
+        shutdown.notify();
+        drop(launched.await);
+    }
+
+    fn negotiate(port: u16, token: &str) -> String {
+        let path = format!("/notifications/hub/negotiate?negotiateVersion=1&access_token={token}");
+        let (status, text) = http(port, "POST", &path, None, None);
+        assert_eq!(status, 200, "{text}");
+        let body: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(body["negotiateVersion"], 1);
+        assert_eq!(body["availableTransports"][0]["transport"], "WebSockets");
+        assert_eq!(body["connectionId"], body["connectionToken"]);
+        body["connectionToken"].as_str().unwrap().to_owned()
+    }
+
+    fn api(port: u16, method: &str, path: &str, token: &str, body: Option<&Value>) -> Value {
+        let bytes = body.map(|value| serde_json::to_vec(value).unwrap());
+        let (status, text) = http(port, method, path, Some(token), bytes.as_deref());
+        assert!(matches!(status, 200 | 204), "{status} {text}");
+        if text.is_empty() {
+            Value::Null
+        } else {
+            serde_json::from_str(&text).unwrap()
+        }
+    }
+
+    fn http(port: u16, method: &str, path: &str, token: Option<&str>, body: Option<&[u8]>) -> (u16, String) {
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        stream.set_read_timeout(Some(Duration::from_secs(8))).unwrap();
+        stream.set_write_timeout(Some(Duration::from_secs(8))).unwrap();
+        let auth = match token {
+            Some(token) => format!("Authorization: Bearer {token}\r\n"),
+            None => String::new(),
+        };
+        let content = match body {
+            Some(body) => format!("Content-Type: application/json\r\nContent-Length: {}\r\n", body.len()),
+            None => String::new(),
+        };
+        let head = format!(
+            "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\nAccept: application/json\r\n{auth}{content}\r\n"
+        );
+        stream.write_all(head.as_bytes()).unwrap();
+        if let Some(body) = body {
+            stream.write_all(body).unwrap();
+        }
+        let mut buf = Vec::new();
+        stream.read_to_end(&mut buf).unwrap();
+        let text = String::from_utf8_lossy(&buf);
+        let (head, raw) = text.split_once("\r\n\r\n").unwrap_or(("", &text));
+        let status = head.split_whitespace().nth(1).unwrap_or("0").parse().unwrap();
+        let body = if head.to_ascii_lowercase().contains("transfer-encoding: chunked") {
+            decode_chunked(raw)
+        } else {
+            raw.to_owned()
+        };
+        (status, body)
+    }
+
+    fn decode_chunked(input: &str) -> String {
+        let mut out = String::new();
+        let mut rest = input;
+        while let Some((size, after)) = rest.split_once("\r\n") {
+            let len = usize::from_str_radix(size.split(';').next().unwrap_or("0").trim(), 16).unwrap_or(0);
+            if len == 0 || after.len() < len {
+                break;
+            }
+            out.push_str(&after[..len]);
+            rest = after[len..].strip_prefix("\r\n").unwrap_or(&after[len..]);
+        }
+        out
+    }
+
+    fn assert_notifications(frames: &[Vec<u8>], entry_id: &str, user_id: &str) {
+        assert_eq!(frames.len(), 3, "expected create, update, delete");
+        for (frame, ut) in frames.iter().zip([30, 31, 32]) {
+            let value = decode_frame(frame);
+            let fields = value.as_array().unwrap();
+            assert_eq!(fields[3].as_str(), Some("ReceiveMessage"));
+            let message = &fields[4].as_array().unwrap()[0];
+            assert_eq!(field(message, "ContextId").as_str(), Some(DEVICE_A));
+            assert_eq!(field(message, "Type").as_i64(), Some(ut));
+            let payload = field(message, "Payload");
+            assert_eq!(field(payload, "Id").as_str(), Some(entry_id));
+            assert_eq!(field(payload, "UserId").as_str(), Some(user_id));
+            assert!(matches!(field(payload, "RevisionDate"), rmpv::Value::Ext(-1, _)));
+        }
+    }
+
+    fn field<'a>(value: &'a rmpv::Value, key: &str) -> &'a rmpv::Value {
+        value.as_map().unwrap().iter().find(|(k, _)| k.as_str() == Some(key)).map(|(_, v)| v).unwrap()
+    }
+
+    fn decode_frame(frame: &[u8]) -> rmpv::Value {
+        let mut index = 0;
+        while frame[index] & 0x80 != 0 {
+            index += 1;
+        }
+        rmpv::decode::read_value(&mut &frame[index + 1..]).unwrap()
+    }
+
+    fn collect_notifications(
+        port: u16,
+        token: &str,
+        connection_id: &str,
+        ready: &std::sync::mpsc::Sender<()>,
+    ) -> Vec<Vec<u8>> {
+        let mut sock = connect_hub(port, token, connection_id).expect("hub upgrade");
+        let mut handshake = br#"{"protocol":"messagepack","version":1}"#.to_vec();
+        handshake.push(0x1e);
+        write_frame(&mut sock, 0x1, &handshake).unwrap();
+        ready.send(()).unwrap();
+
+        let mut notes = Vec::new();
+        while notes.len() < 3 {
+            let (opcode, payload) = read_frame(&mut sock).expect("hub frame");
+            match opcode {
+                0x9 => write_frame(&mut sock, 0xA, &payload).unwrap(),
+                0x2 if payload.as_slice() != b"{}\x1e" => notes.push(payload),
+                0x8 => break,
+                _ => {}
+            }
+        }
+        notes
+    }
+
+    fn connect_hub(port: u16, token: &str, connection_id: &str) -> std::io::Result<TcpStream> {
+        let mut stream = TcpStream::connect(("127.0.0.1", port))?;
+        stream.set_nodelay(true)?;
+        stream.set_read_timeout(Some(Duration::from_secs(8)))?;
+        stream.set_write_timeout(Some(Duration::from_secs(8)))?;
+        let request = format!(
+            "GET /notifications/hub?id={connection_id}&access_token={token} HTTP/1.1\r\n\
+             Host: 127.0.0.1:{port}\r\n\
+             Upgrade: websocket\r\n\
+             Connection: Upgrade\r\n\
+             Sec-WebSocket-Version: 13\r\n\
+             Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
+             \r\n"
+        );
+        stream.write_all(request.as_bytes())?;
+        let mut buf = Vec::new();
+        let mut byte = [0u8; 1];
+        loop {
+            stream.read_exact(&mut byte)?;
+            buf.push(byte[0]);
+            if buf.ends_with(b"\r\n\r\n") {
+                break;
+            }
+            if buf.len() > 8192 {
+                return Err(std::io::Error::other(format!("handshake too long: {}", String::from_utf8_lossy(&buf))));
+            }
+        }
+        let head = String::from_utf8_lossy(&buf);
+        if !head.starts_with("HTTP/1.1 101") {
+            return Err(std::io::Error::other(format!("upgrade failed: {head}")));
+        }
+        Ok(stream)
+    }
+
+    fn write_frame(stream: &mut TcpStream, opcode: u8, payload: &[u8]) -> std::io::Result<()> {
+        let mask = [0x11u8, 0x22, 0x33, 0x44];
+        let mut header = vec![0x80 | opcode];
+        let len = payload.len();
+        if len < 126 {
+            header.push(0x80 | u8::try_from(len).unwrap());
+        } else {
+            header.push(0x80 | 0x7e);
+            header.extend(u16::try_from(len).unwrap().to_be_bytes());
+        }
+        header.extend(mask);
+        stream.write_all(&header)?;
+        let masked: Vec<u8> = payload.iter().enumerate().map(|(i, byte)| byte ^ mask[i % 4]).collect();
+        stream.write_all(&masked)
+    }
+
+    fn read_frame(stream: &mut TcpStream) -> std::io::Result<(u8, Vec<u8>)> {
+        let mut head = [0u8; 2];
+        stream.read_exact(&mut head)?;
+        let opcode = head[0] & 0x0f;
+        let masked = head[1] & 0x80 != 0;
+        let mut len = usize::from(head[1] & 0x7f);
+        if len == 126 {
+            let mut ext = [0u8; 2];
+            stream.read_exact(&mut ext)?;
+            len = usize::from(u16::from_be_bytes(ext));
+        } else if len == 127 {
+            return Err(std::io::Error::other("frame too large"));
+        }
+        let mask = if masked {
+            let mut mask = [0u8; 4];
+            stream.read_exact(&mut mask)?;
+            Some(mask)
+        } else {
+            None
+        };
+        let mut payload = vec![0u8; len];
+        stream.read_exact(&mut payload)?;
+        if let Some(mask) = mask {
+            for (i, byte) in payload.iter_mut().enumerate() {
+                *byte ^= mask[i % 4];
+            }
+        }
+        Ok((opcode, payload))
+    }
+}

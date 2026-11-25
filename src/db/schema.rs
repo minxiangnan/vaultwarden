@@ -223,6 +223,8 @@ table! {
         security_state -> Nullable<Text>,
         security_version -> Nullable<Integer>,
         v2_upgrade_token -> Nullable<Text>,
+        authenticator_legacy_key -> Nullable<Text>,
+        authenticator_legacy_key_id -> Nullable<Text>,
     }
 }
 
@@ -379,7 +381,26 @@ table! {
     }
 }
 
+table! {
+    authenticator_entries (uuid) {
+        uuid -> Text,
+        user_uuid -> Text,
+        name -> Text,
+        issuer -> Nullable<Text>,
+        secret -> Text,
+        algorithm -> Text,
+        digits -> Integer,
+        period -> Integer,
+        notes -> Nullable<Text>,
+        favorite -> Bool,
+        sort_order -> Integer,
+        revision_date -> Timestamp,
+        creation_date -> Timestamp,
+    }
+}
+
 joinable!(archives -> users (user_uuid));
+joinable!(authenticator_entries -> users (user_uuid));
 joinable!(archives -> ciphers (cipher_uuid));
 joinable!(attachments -> ciphers (cipher_uuid));
 joinable!(ciphers -> organizations (organization_uuid));
@@ -414,6 +435,7 @@ joinable!(user_signature_key_pairs -> users (user_uuid));
 
 allow_tables_to_appear_in_same_query!(
     archives,
+    authenticator_entries,
     attachments,
     ciphers,
     ciphers_collections,
